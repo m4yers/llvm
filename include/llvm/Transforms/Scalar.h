@@ -106,6 +106,12 @@ FunctionPass *createSROAPass();
 
 //===----------------------------------------------------------------------===//
 //
+// SSAPRE - This pass performs SSA Partial Redundancy Elimination akin to LCM.
+//
+FunctionPass *createSSAPREPass();
+
+//===----------------------------------------------------------------------===//
+//
 // InductiveRangeCheckElimination - Transform loops to elide range checks on
 // linear functions of the induction variable.
 //

@@ -80,6 +80,7 @@ void llvm::initializeScalarOpts(PassRegistry &Registry) {
   initializeSCCPLegacyPassPass(Registry);
   initializeIPSCCPLegacyPassPass(Registry);
   initializeSROALegacyPassPass(Registry);
+  initializeSSAPRELegacyPass(Registry);
   initializeCFGSimplifyPassPass(Registry);
   initializeStructurizeCFGPass(Registry);
   initializeSinkingLegacyPassPass(Registry);

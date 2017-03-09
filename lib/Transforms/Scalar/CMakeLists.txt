@@ -52,6 +52,7 @@ add_llvm_library(LLVMScalarOpts
   RewriteStatepointsForGC.cpp
   SCCP.cpp
   SROA.cpp
+  SSAPRE.cpp
   Scalar.cpp
   Scalarizer.cpp
   SeparateConstOffsetFromGEP.cpp
