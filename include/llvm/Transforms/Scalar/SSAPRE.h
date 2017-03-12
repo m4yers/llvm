@@ -63,16 +63,19 @@ inline std::string ExpressionTypeToString(ExpressionType ET) {
 
 class Expression {
 private:
+  static unsigned LastID;
+  unsigned ID;
   ExpressionType EType;
   unsigned Opcode;
 
 public:
   Expression(ExpressionType ET = ET_Base, unsigned O = ~2U)
-      : EType(ET), Opcode(O) {}
+      : ID(LastID++), EType(ET), Opcode(O) {}
   // Expression(const Expression &) = delete;
   // Expression &operator=(const Expression &) = delete;
   virtual ~Expression();
 
+  unsigned getID() const { return ID; }
   unsigned getOpcode() const { return Opcode; }
   void setOpcode(unsigned opcode) { Opcode = opcode; }
   ExpressionType getExpressionType() const { return EType; }
@@ -128,7 +131,7 @@ public:
   IgnoredExpression(Instruction *I) : IgnoredExpression(I, ET_Ignored) {}
   IgnoredExpression(Instruction *I, ExpressionType ET) : Expression(ET), Inst(I) {}
   IgnoredExpression() = delete;
-  IgnoredExpression(const IgnoredExpression &) = delete;
+  IgnoredExpression(IgnoredExpression &) = delete;
   IgnoredExpression &operator=(const IgnoredExpression &) = delete;
   ~IgnoredExpression() override;
 
@@ -161,7 +164,7 @@ class UnknownExpression final : public IgnoredExpression {
 public:
   UnknownExpression(Instruction *I) : IgnoredExpression(I, ET_Unknown) {}
   UnknownExpression() = delete;
-  UnknownExpression(const UnknownExpression &) = delete;
+  UnknownExpression(UnknownExpression &) = delete;
   UnknownExpression &operator=(const UnknownExpression &) = delete;
   ~UnknownExpression() override;
 
@@ -201,7 +204,7 @@ public:
     return Operands[N];
   }
 
-  SmallVector<Value *, 2>& getOperands() {
+  const SmallVector<Value *, 2>& getOperands() const {
     return Operands;
   }
 
@@ -280,18 +283,23 @@ public:
   //
   void printInternal(raw_ostream &OS) const override {
     this->BasicExpression::printInternal(OS);
-    OS << "BB = " << BB->getName();
+    OS << "BB = " << BB->getValueName();
   }
 }; // class PHIExpression
 
 class FactorExpression final : public Expression {
 private:
-  BasicBlock *BB;
-  std::vector<Expression *> Expressions;
+  const Expression &E;
+  const BasicBlock &BB;
+  SmallVector<const BasicBlock *, 8> Pred;
+  SmallVector<int, 8> Versions;
+  int Version;
 
 public:
-  FactorExpression(BasicBlock *BB, std::vector<Expression *> E)
-      : Expression(ET_Factor), BB(BB), Expressions(E) {}
+  FactorExpression(const Expression &E, const BasicBlock &BB,
+                   SmallVector<const BasicBlock *, 8> P)
+      : Expression(ET_Factor), E(E), BB(BB), Pred(P),
+                   Versions(P.size(), -1), Version(-1) { }
   FactorExpression() = delete;
   FactorExpression(const FactorExpression &) = delete;
   FactorExpression &operator=(const FactorExpression &) = delete;
@@ -305,11 +313,12 @@ public:
     if (!this->Expression::equals(Other))
       return false;
     const FactorExpression &OE = cast<FactorExpression>(Other);
-    return BB == OE.BB;
+    return &BB == &OE.BB;
   }
 
   hash_code getHashValue() const override {
-    return hash_combine(this->Expression::getHashValue(), BB);
+    return hash_combine(this->Expression::getHashValue(), &E, &BB,
+        hash_combine_range(Versions.begin(), Versions.end()));
   }
 
   //
@@ -317,7 +326,17 @@ public:
   //
   void printInternal(raw_ostream &OS) const override {
     this->Expression::printInternal(OS);
-    OS << "BB = " << BB->getName();
+    OS << "BB = ";
+    BB.printAsOperand(OS, false);
+    OS << ", E = " << E.getID()
+       << ", V = <";
+    for (unsigned i = 0, l = Versions.size(); i < l; ++i) {
+      OS << Versions[i];
+      if (i + 1 != l) {
+        OS << ", ";
+      }
+    }
+    OS << ">";
   }
 }; // class FactorExpression
 } // end namespace ssapre
@@ -350,10 +369,10 @@ template <> struct DenseMapInfo<const Expression *> {
 
 /// Performs SSA PRE pass.
 class SSAPRE : public PassInfoMixin<SSAPRE> {
-  DominatorTree *DT;
   const DataLayout *DL;
   const TargetLibraryInfo *TLI;
   AssumptionCache *AC;
+  DominatorTree *DT;
 
   // Number of function arguments, used by ranking
   unsigned int NumFuncArgs;
@@ -364,8 +383,14 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
   // means that the instruction is dead.
   DenseMap<const Value *, unsigned> InstrDFS;
 
-  // Expression-to-Definitions map
-  DenseMap<const Expression *, SmallPtrSet<const Value *, 5>> ExpressionToInsts;
+  // Expression-to-Instructions map
+  DenseMap<const Expression *, SmallPtrSet<const Instruction *, 5>> ExpressionToInsts;
+
+  // Expression-toBasicBlock map
+  DenseMap<const Expression *, SmallPtrSet<BasicBlock *, 5>> ExpressionToBlocks;
+
+  // BasicBlock-to-FactorList map
+  DenseMap<const BasicBlock *, SmallPtrSet<FactorExpression *, 5>> BlockToFactors;
 
 public:
   PreservedAnalyses run(Function &F, AnalysisManager<Function> &AM);
@@ -394,11 +419,14 @@ private:
   // TODO: Once finished, this should not take an Instruction, we only
   // use it for printing.
   Expression * CheckSimplificationResults(Expression *E,
-                                          Instruction &I, Value *V);
+                                          Instruction &I,
+                                          Value *V);
   Expression * CreateIgnoredExpression(Instruction &I);
   Expression * CreateUnknownExpression(Instruction &I);
   Expression * CreateBasicExpression(Instruction &I);
   Expression * CreatePHIExpression(Instruction &I);
+  FactorExpression * CreateFactorExpression(const Expression &E,
+                                            const BasicBlock &B);
   Expression * CreateExpression(Instruction &I);
   PreservedAnalyses runImpl(Function &F, AssumptionCache &_AC,
                             TargetLibraryInfo &_TLI, DominatorTree &_DT);

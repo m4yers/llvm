@@ -22,6 +22,7 @@
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/IR/Type.h"
+#include "llvm/IR/CFG.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
@@ -60,6 +61,7 @@ UnknownExpression::~UnknownExpression() = default;
 BasicExpression::~BasicExpression() = default;
 PHIExpression::~PHIExpression() = default;
 FactorExpression::~FactorExpression() = default;
+unsigned Expression::LastID = 0;
 }
 }
 
@@ -270,6 +272,11 @@ CreatePHIExpression(Instruction &I) {
   return E;
 }
 
+FactorExpression *SSAPRE::
+CreateFactorExpression(const Expression &E, const BasicBlock &B) {
+  return new FactorExpression(E, B, {pred_begin(&B), pred_end(&B)});
+}
+
 Expression *
 SSAPRE::CreateExpression(Instruction &I) {
   Expression * E = nullptr;
@@ -348,10 +355,10 @@ SSAPRE::runImpl(Function &F, AssumptionCache &_AC,
                 TargetLibraryInfo &_TLI, DominatorTree &_DT) {
   bool Changed = false;
 
-  DT = &_DT;
   TLI = &_TLI;
   DL = &F.getParent()->getDataLayout();
   AC = &_AC;
+  DT = &_DT;
 
   NumFuncArgs = F.arg_size();
 
@@ -367,16 +374,18 @@ SSAPRE::runImpl(Function &F, AssumptionCache &_AC,
 
   // Collect all expressions
   ReversePostOrderTraversal<Function *> RPOT(&F);
-  for (auto &BB : RPOT) {
-    for (auto &I : *BB) {
+  for (const auto &B : RPOT) {
+    for (auto &I : *B) {
       // We map every instruction except terminators
       if (!I.isTerminator()) {
         auto E = CreateExpression(I);
         assert(E && "Oh No!");
         if (!ExpressionToInsts.count(E)) {
           ExpressionToInsts.insert({E, {&I}});
+          ExpressionToBlocks.insert({E, {B}});
         } else {
           ExpressionToInsts[E].insert(&I);
+          ExpressionToBlocks[E].insert(B);
         }
       }
     }
@@ -385,15 +394,73 @@ SSAPRE::runImpl(Function &F, AssumptionCache &_AC,
   DEBUG(
       dbgs() << "ExpressionsToInts\n";
       for (auto &P : ExpressionToInsts) {
-      dbgs() << "(" << P.getSecond().size() << ") ";
+        dbgs() << "(" << P.getSecond().size() << ") ";
         P.getFirst()->printInternal(dbgs());
         dbgs() << ":";
-        for (const auto &E : P.getSecond()) {
-          dbgs() << "\n" << *E;
+        for (const auto &I : P.getSecond()) {
+          dbgs() << "\n" << *I;
         }
         dbgs() << "\n";
       }
   );
+
+  // STEP 1: F-Insertion
+  // Factors are inserted in two cases:
+  //   - for each block in expressions IDF
+  //   - for each phi of expression operand, which indicates expression alteration
+  for (auto &P : ExpressionToInsts) {
+    auto &E = P.getFirst();
+    if (IgnoredExpression::classof(E) || UnknownExpression::classof(E)){
+      continue;
+    }
+
+    SmallVector<BasicBlock *, 32> IDF;
+    ForwardIDFCalculator IDFs(*DT);
+    IDFs.setDefiningBlocks(ExpressionToBlocks[E]);
+    // IDFs.setLiveInBlocks(BlocksWithDeadTerminators);
+    IDFs.calculate(IDF);
+
+    for (const auto &B : IDF) {
+      auto F = CreateFactorExpression(*E, *B);
+      if (!BlockToFactors.count(B)) {
+        BlockToFactors.insert({B, {F}});
+      } else {
+        BlockToFactors[B].insert({F});
+      }
+    }
+
+    if (const auto *BE = dyn_cast<const BasicExpression>(E)) {
+      for (auto &O : BE->getOperands()) {
+        if (const auto *PHI = dyn_cast<const PHINode>(O)) {
+          // TODO
+          // At this point we do not traverse phi-ud graph for expression's
+          // operands since expressions by itself do not identify a phi-ud graph
+          // as a single variable that changes over time
+          auto B = PHI->getParent();
+          auto F = CreateFactorExpression(*E, *B);
+          if (!BlockToFactors.count(B)) {
+            BlockToFactors.insert({B, {F}});
+          } else {
+            BlockToFactors[B].insert({F});
+          }
+        }
+      }
+    }
+  }
+
+  // DEBUG(
+      dbgs() << "BlockToFactors\n";
+      for (auto &P : BlockToFactors) {
+        dbgs() << "(" << P.getSecond().size() << ") ";
+        P.getFirst()->printAsOperand(dbgs(), false);
+        dbgs() << ":";
+        for (const auto &F : P.getSecond()) {
+          dbgs() << "\n";
+          F->printInternal(dbgs());
+        }
+        dbgs() << "\n";
+      }
+  // );
 
   if (!Changed)
     return PreservedAnalyses::all();
@@ -432,8 +499,8 @@ public:
       return false;
 
     auto &AC = getAnalysis<AssumptionCacheTracker>().getAssumptionCache(F);
-    auto &DT = getAnalysis<DominatorTreeWrapperPass>().getDomTree();
     auto &TLI = getAnalysis<TargetLibraryInfoWrapperPass>().getTLI();
+    auto &DT = getAnalysis<DominatorTreeWrapperPass>().getDomTree();
     auto PA = Impl.runImpl(F, AC, TLI, DT);
     return !PA.areAllPreserved();
   }
@@ -441,8 +508,8 @@ public:
 private:
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.addRequired<AssumptionCacheTracker>();
-    AU.addRequired<DominatorTreeWrapperPass>();
     AU.addRequired<TargetLibraryInfoWrapperPass>();
+    AU.addRequired<DominatorTreeWrapperPass>();
   }
 };
 
@@ -457,8 +524,8 @@ INITIALIZE_PASS_BEGIN(SSAPRELegacy,
                       false, false)
 INITIALIZE_PASS_DEPENDENCY(BreakCriticalEdges)
 INITIALIZE_PASS_DEPENDENCY(AssumptionCacheTracker)
-INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfoWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
 INITIALIZE_PASS_END(SSAPRELegacy,
                     "ssapre",
                     "SSA Partial Redundancy Elimination",
