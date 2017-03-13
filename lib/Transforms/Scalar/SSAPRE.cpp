@@ -70,7 +70,8 @@ unsigned Expression::LastID = 0;
 //===----------------------------------------------------------------------===//
 
 std::pair<unsigned, unsigned> SSAPRE::
-AssignDFSNumbers(BasicBlock *B, unsigned Start) {
+AssignDFSNumbers(BasicBlock *B, unsigned Start,
+                 InstrToOrderType *M, OrderedInstrType *V) {
   unsigned End = Start;
   // if (MemoryAccess *MemPhi = MSSA->getMemoryAccess(B)) {
   //   InstrDFS[MemPhi] = End++;
@@ -78,8 +79,8 @@ AssignDFSNumbers(BasicBlock *B, unsigned Start) {
   // }
 
   for (auto &I : *B) {
-    InstrDFS[&I] = End++;
-    // DFSToInstr.emplace_back(&I);
+    if (M) (*M)[&I] = End++;
+    if (V) V->emplace_back(&I);
   }
 
   // All of the range functions taken half-open ranges (open on the end side).
@@ -362,37 +363,114 @@ SSAPRE::runImpl(Function &F, AssumptionCache &_AC,
 
   NumFuncArgs = F.arg_size();
 
-  // Assign each instruction a DFS order number
-  unsigned ICount = 0;
+  unsigned ICount = 1;
+  // DFSToInstr.emplace_back(nullptr);
+
+  // This is used during renaming step
+  DenseMap<const Expression *, FactorRenamingContext> RenamingContexts;
+
+  ReversePostOrderTraversal<Function *> RPOT(&F);
+
+  // Assign each block RPO index
+  DenseMap<const DomTreeNode *, unsigned> RPOOrdering;
+  unsigned Counter = 0;
+  for (auto &B : RPOT) {
+    auto *Node = DT->getNode(B);
+    assert(Node && "RPO and Dominator tree should have same reachability");
+    RPOOrdering[Node] = ++Counter;
+  }
+
+  // Sort dominator tree children arrays into RPO.
+  for (auto &B : RPOT) {
+    auto *Node = DT->getNode(B);
+    if (Node->getChildren().size() > 1) {
+      std::sort(Node->begin(), Node->end(),
+                [&RPOOrdering](const DomTreeNode *A, const DomTreeNode *B) {
+                  return RPOOrdering[A] < RPOOrdering[B];
+                });
+    }
+  }
+
+  // Assign each instruction a DFS order number. This will be the main order
+  // we traverse DT in.
   auto DFI = df_begin(DT->getRootNode());
   for (auto DFE = df_end(DT->getRootNode()); DFI != DFE; ++DFI) {
     BasicBlock *B = DFI->getBlock();
-    const auto &BlockRange = AssignDFSNumbers(B, ICount);
+    const auto &BlockRange = AssignDFSNumbers(B, ICount, &InstrDFS, &DFSToInstr);
     // BlockInstRange.insert({B, BlockRange});
     ICount += BlockRange.second - BlockRange.first;
   }
 
+  // Now we need to create Reverse Sorted Dominator Tree, where siblings sorted
+  // in the opposite to RPO order. This order will give us a clue when during
+  // the normal traversal we go up the tree. For example:
+  //
+  //   CFG:    DT:
+  //
+  //    a       a     RPO(CFG): { a, c, b, d, e } // normal cfg rpo
+  //   / \    / | \   DFS(DT):  { a, b, d, e, c } // before reorder
+  //  b   c  b  d  c  DFS(DT):  { a, c, b, d, e } // after reorder
+  //   \ /      |
+  //    d       e     SDFS(DT): { a, d, e, b, c } // after reverse reorder
+  //    |             SDFSO(DFS(DT),SDFS(DT)): { 1, 5, 4, 2, 3 }
+  //    e                                          <  >  >  <
+  //
+  // So this SDFSO which maps our RPOish DFS(DT) onto SDFS order gives us points
+  // where we must backtrace our context(stack or whatever we keep updated).
+  // These are the places where the next SDFSO is less than the previous one.
+  //
+  for (auto &B : RPOT) {
+    auto *Node = DT->getNode(B);
+    if (Node->getChildren().size() > 1) {
+      std::sort(Node->begin(), Node->end(),
+                [&RPOOrdering](const DomTreeNode *A, const DomTreeNode *B) {
+                  // NOTE here we are using the reversed operator
+                  return RPOOrdering[A] > RPOOrdering[B];
+                });
+    }
+  }
+
+  // Calculate Instruction-to-SDFS map
+  ICount = 1;
+  DFI = df_begin(DT->getRootNode());
+  for (auto DFE = df_end(DT->getRootNode()); DFI != DFE; ++DFI) {
+    BasicBlock *B = DFI->getBlock();
+    const auto &BlockRange = AssignDFSNumbers(B, ICount, &InstrSDFS, nullptr);
+    // BlockInstRange.insert({B, BlockRange});
+    ICount += BlockRange.second - BlockRange.first;
+  }
+
+  DEBUG(
+    dbgs() << "\nORDERS DFS/SDFS";
+    for (auto &I : DFSToInstr) {
+      dbgs() << "\n" << InstrDFS[I];
+      dbgs() << "\t" << InstrSDFS[I];
+      dbgs() << "\t" << *I;
+    }
+  );
+
   // Collect all expressions
-  ReversePostOrderTraversal<Function *> RPOT(&F);
+  // ReversePostOrderTraversal<Function *> RPOT(&F);
   for (const auto &B : RPOT) {
     for (auto &I : *B) {
       // We map every instruction except terminators
-      if (!I.isTerminator()) {
-        auto E = CreateExpression(I);
-        assert(E && "Oh No!");
-        if (!ExpressionToInsts.count(E)) {
-          ExpressionToInsts.insert({E, {&I}});
-          ExpressionToBlocks.insert({E, {B}});
-        } else {
-          ExpressionToInsts[E].insert(&I);
-          ExpressionToBlocks[E].insert(B);
-        }
+      if (I.isTerminator()) continue;
+      auto E = CreateExpression(I);
+      assert(E && "Oh No!");
+      InstToExpression.insert({&I, E});
+      if (!ExpressionToInsts.count(E)) {
+        RenamingContexts.insert({E, {}});
+        ExpressionToInsts.insert({E, {&I}});
+        ExpressionToBlocks.insert({E, {B}});
+      } else {
+        ExpressionToInsts[E].insert(&I);
+        ExpressionToBlocks[E].insert(B);
       }
     }
   }
 
   DEBUG(
-      dbgs() << "ExpressionsToInts\n";
+      dbgs() << "\nExpressionsToInts\n";
       for (auto &P : ExpressionToInsts) {
         dbgs() << "(" << P.getSecond().size() << ") ";
         P.getFirst()->printInternal(dbgs());
@@ -448,7 +526,7 @@ SSAPRE::runImpl(Function &F, AssumptionCache &_AC,
     }
   }
 
-  // DEBUG(
+  DEBUG(
       dbgs() << "BlockToFactors\n";
       for (auto &P : BlockToFactors) {
         dbgs() << "(" << P.getSecond().size() << ") ";
@@ -460,7 +538,23 @@ SSAPRE::runImpl(Function &F, AssumptionCache &_AC,
         }
         dbgs() << "\n";
       }
-  // );
+  );
+
+
+  // STEP 2: Rename
+  // We assign SSA versions to each factor definition
+  std::stack<const Expression *> ExpressionsStack;
+  DFI = df_begin(DT->getRootNode());
+  for (auto DFE = df_end(DT->getRootNode()); DFI != DFE; ++DFI) {
+    auto B = DFI->getBlock();
+    for (auto &I : *B) {
+      if (I.isTerminator()) continue;
+      auto &E = InstToExpression[&I];
+      auto &C = RenamingContexts[E];
+      E->setVerion(C.Counter++);
+      ExpressionsStack.push(E);
+    }
+  }
 
   if (!Changed)
     return PreservedAnalyses::all();

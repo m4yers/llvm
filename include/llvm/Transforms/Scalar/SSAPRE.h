@@ -21,6 +21,7 @@
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/Support/ArrayRecycler.h"
+#include <stack>
 
 namespace llvm {
 
@@ -67,10 +68,11 @@ private:
   unsigned ID;
   ExpressionType EType;
   unsigned Opcode;
+  int Version;
 
 public:
   Expression(ExpressionType ET = ET_Base, unsigned O = ~2U)
-      : ID(LastID++), EType(ET), Opcode(O) {}
+      : ID(LastID++), EType(ET), Opcode(O), Version(-1) {}
   // Expression(const Expression &) = delete;
   // Expression &operator=(const Expression &) = delete;
   virtual ~Expression();
@@ -80,7 +82,9 @@ public:
   void setOpcode(unsigned opcode) { Opcode = opcode; }
   ExpressionType getExpressionType() const { return EType; }
 
-  // ??? What are those?
+  int getVerion() const { return Version; }
+  void setVerion(int V) { Version = V; }
+
   static unsigned getEmptyKey() { return ~0U; }
   static unsigned getTombstoneKey() { return ~1U; }
 
@@ -293,13 +297,12 @@ private:
   const BasicBlock &BB;
   SmallVector<const BasicBlock *, 8> Pred;
   SmallVector<int, 8> Versions;
-  int Version;
 
 public:
   FactorExpression(const Expression &E, const BasicBlock &BB,
                    SmallVector<const BasicBlock *, 8> P)
       : Expression(ET_Factor), E(E), BB(BB), Pred(P),
-                   Versions(P.size(), -1), Version(-1) { }
+                   Versions(P.size(), -1) { }
   FactorExpression() = delete;
   FactorExpression(const FactorExpression &) = delete;
   FactorExpression &operator=(const FactorExpression &) = delete;
@@ -339,6 +342,13 @@ public:
     OS << ">";
   }
 }; // class FactorExpression
+
+class FactorRenamingContext {
+public:
+  unsigned Counter;
+  std::stack<int> Stack;
+};
+
 } // end namespace ssapre
 
 using namespace ssapre;
@@ -381,12 +391,21 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
   // This contains a mapping from Instructions to DFS numbers.
   // The numbering starts at 1. An instruction with DFS number zero
   // means that the instruction is dead.
-  DenseMap<const Value *, unsigned> InstrDFS;
+  typedef DenseMap<const Value *, unsigned> InstrToOrderType;
+  InstrToOrderType InstrDFS;
+  InstrToOrderType InstrSDFS;
+
+  // This contains the mapping DFS numbers to instructions.
+  typedef SmallVector<const Value *, 32> OrderedInstrType;
+  OrderedInstrType DFSToInstr;
+
+  // Instruction-to-Expression map
+  DenseMap<const Instruction *, Expression *> InstToExpression;
 
   // Expression-to-Instructions map
   DenseMap<const Expression *, SmallPtrSet<const Instruction *, 5>> ExpressionToInsts;
 
-  // Expression-toBasicBlock map
+  // Expression-to-BasicBlock map
   DenseMap<const Expression *, SmallPtrSet<BasicBlock *, 5>> ExpressionToBlocks;
 
   // BasicBlock-to-FactorList map
@@ -398,7 +417,9 @@ public:
 private:
   friend ssapre::SSAPRELegacy;
 
-  std::pair<unsigned, unsigned> AssignDFSNumbers(BasicBlock *B, unsigned Start);
+  std::pair<unsigned, unsigned> AssignDFSNumbers(BasicBlock *B, unsigned Start,
+                                                 InstrToOrderType *M,
+                                                 OrderedInstrType *V);
 
   // This function provides global ranking of operations so that we can place them
   // in a canonical order.  Note that rank alone is not necessarily enough for a
