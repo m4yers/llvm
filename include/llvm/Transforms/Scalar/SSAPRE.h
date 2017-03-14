@@ -83,7 +83,7 @@ public:
   ExpressionType getExpressionType() const { return EType; }
 
   int getVerion() const { return Version; }
-  void setVerion(int V) { Version = V; }
+  void setVersion(int V) { Version = V; }
 
   static unsigned getEmptyKey() { return ~0U; }
   static unsigned getTombstoneKey() { return ~1U; }
@@ -114,8 +114,9 @@ public:
   // Debugging support
   //
   virtual void printInternal(raw_ostream &OS) const {
-    OS << ExpressionTypeToString(getExpressionType()) << ", ";
-    OS << "OPC: " << getOpcode() << ", ";
+    OS << ExpressionTypeToString(getExpressionType());
+    OS << ", V: " << Version;
+    OS << ", OPC: " << getOpcode() << ", ";
   }
 
   void print(raw_ostream &OS) const {
@@ -293,20 +294,34 @@ public:
 
 class FactorExpression final : public Expression {
 private:
-  const Expression &E;
+  const Expression &PE;
   const BasicBlock &BB;
   SmallVector<const BasicBlock *, 8> Pred;
-  SmallVector<int, 8> Versions;
+  SmallVector<Expression *, 8> Versions;
 
 public:
-  FactorExpression(const Expression &E, const BasicBlock &BB,
+  FactorExpression(const Expression &PE, const BasicBlock &BB,
                    SmallVector<const BasicBlock *, 8> P)
-      : Expression(ET_Factor), E(E), BB(BB), Pred(P),
-                   Versions(P.size(), -1) { }
+      : Expression(ET_Factor), PE(PE), BB(BB), Pred(P),
+                   Versions(P.size(), nullptr) { }
   FactorExpression() = delete;
   FactorExpression(const FactorExpression &) = delete;
   FactorExpression &operator=(const FactorExpression &) = delete;
   ~FactorExpression() override;
+
+  const Expression& getPExpr() const { return PE; }
+
+  size_t getPredIndex(BasicBlock * B) const {
+    for (size_t i = 0; i < Pred.size(); ++i) {
+      if (Pred[i] == B) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  void setVExpr(unsigned P, Expression * V) { Versions[P] = V; }
+  SmallVector<Expression *, 8> getVExprs() { return Versions; };
 
   static bool classof(const Expression *EB) {
     return EB->getExpressionType() == ET_Factor;
@@ -320,7 +335,7 @@ public:
   }
 
   hash_code getHashValue() const override {
-    return hash_combine(this->Expression::getHashValue(), &E, &BB,
+    return hash_combine(this->Expression::getHashValue(), &PE, &BB,
         hash_combine_range(Versions.begin(), Versions.end()));
   }
 
@@ -331,12 +346,16 @@ public:
     this->Expression::printInternal(OS);
     OS << "BB = ";
     BB.printAsOperand(OS, false);
-    OS << ", E = " << E.getID()
+    OS << ", E = " << PE.getID()
        << ", V = <";
     for (unsigned i = 0, l = Versions.size(); i < l; ++i) {
-      OS << Versions[i];
+      if (Versions[i]) {
+        OS << Versions[i]->getVerion();
+      } else {
+        OS << "⊥";
+      }
       if (i + 1 != l) {
-        OS << ", ";
+        OS << ",";
       }
     }
     OS << ">";
@@ -400,16 +419,22 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
   OrderedInstrType DFSToInstr;
 
   // Instruction-to-Expression map
-  DenseMap<const Instruction *, Expression *> InstToExpression;
+  DenseMap<const Instruction *, Expression *> InstToVExpr;
 
-  // Expression-to-Instructions map
-  DenseMap<const Expression *, SmallPtrSet<const Instruction *, 5>> ExpressionToInsts;
+  // ProtoExpression-to-Instructions map
+  DenseMap<const Expression *, SmallPtrSet<const Instruction *, 5>> PExprToInsts;
 
-  // Expression-to-BasicBlock map
-  DenseMap<const Expression *, SmallPtrSet<BasicBlock *, 5>> ExpressionToBlocks;
+  // ProtoExpression-to-BasicBlock map
+  DenseMap<const Expression *, SmallPtrSet<BasicBlock *, 5>> PExprToBlocks;
 
   // BasicBlock-to-FactorList map
   DenseMap<const BasicBlock *, SmallPtrSet<FactorExpression *, 5>> BlockToFactors;
+
+  // ProtoExpression-to-VersionedExpressions
+  DenseMap<const Expression *, SmallPtrSet<Expression *, 5>> PExprToVExprs;
+
+  // VersionedExpression-to-ProtoVersioned
+  DenseMap<Expression *, const Expression *> VExprToPExpr;
 
 public:
   PreservedAnalyses run(Function &F, AnalysisManager<Function> &AM);

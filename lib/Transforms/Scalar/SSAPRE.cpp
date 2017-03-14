@@ -69,6 +69,9 @@ unsigned Expression::LastID = 0;
 // Pass Implementation
 //===----------------------------------------------------------------------===//
 
+// This is used as ⊥ version
+Expression BExpr;
+
 std::pair<unsigned, unsigned> SSAPRE::
 AssignDFSNumbers(BasicBlock *B, unsigned Start,
                  InstrToOrderType *M, OrderedInstrType *V) {
@@ -367,18 +370,63 @@ SSAPRE::runImpl(Function &F, AssumptionCache &_AC,
   // DFSToInstr.emplace_back(nullptr);
 
   // This is used during renaming step
-  DenseMap<const Expression *, FactorRenamingContext> RenamingContexts;
+  DenseMap<const Expression *, FactorRenamingContext> PExprToRC;
 
   ReversePostOrderTraversal<Function *> RPOT(&F);
 
-  // Assign each block RPO index
   DenseMap<const DomTreeNode *, unsigned> RPOOrdering;
   unsigned Counter = 0;
   for (auto &B : RPOT) {
     auto *Node = DT->getNode(B);
     assert(Node && "RPO and Dominator tree should have same reachability");
+
+    // Assign each block RPO index
     RPOOrdering[Node] = ++Counter;
+
+    // Collect all the expressions
+    for (auto &I : *B) {
+      // We map every instruction except terminators
+      if (I.isTerminator()) continue;
+
+      // Create ProtoExpresison, this expression will not be versioned and used
+      // to bind Versioned Expressions of the same kind/class.
+      auto PE = CreateExpression(I);
+      // This is the real versioned expression
+      auto VE = CreateExpression(I);
+      assert(PE && VE && "Oh No!");
+
+      InstToVExpr.insert({&I, VE});
+      VExprToPExpr[VE] = PE;
+      if (!PExprToVExprs.count(PE)) {
+        PExprToVExprs.insert({PE, {VE}});
+      } else {
+        PExprToVExprs[PE].insert(VE);
+      }
+
+      // Map Proto-to-Reals and Proto-to-Blocks
+      if (!PExprToInsts.count(PE)) {
+        PExprToRC.insert({PE, {}});
+        PExprToInsts.insert({PE, {&I}});
+        PExprToBlocks.insert({PE, {B}});
+      } else {
+        PExprToInsts[PE].insert(&I);
+        PExprToBlocks[PE].insert(B);
+      }
+    }
   }
+
+  DEBUG(
+      dbgs() << "\nExpressionsToInts\n";
+      for (auto &P : PExprToInsts) {
+        dbgs() << "(" << P.getSecond().size() << ") ";
+        P.getFirst()->printInternal(dbgs());
+        dbgs() << ":";
+        for (const auto &I : P.getSecond()) {
+          dbgs() << "\n" << *I;
+        }
+        dbgs() << "\n";
+      }
+  );
 
   // Sort dominator tree children arrays into RPO.
   for (auto &B : RPOT) {
@@ -449,57 +497,23 @@ SSAPRE::runImpl(Function &F, AssumptionCache &_AC,
     }
   );
 
-  // Collect all expressions
-  // ReversePostOrderTraversal<Function *> RPOT(&F);
-  for (const auto &B : RPOT) {
-    for (auto &I : *B) {
-      // We map every instruction except terminators
-      if (I.isTerminator()) continue;
-      auto E = CreateExpression(I);
-      assert(E && "Oh No!");
-      InstToExpression.insert({&I, E});
-      if (!ExpressionToInsts.count(E)) {
-        RenamingContexts.insert({E, {}});
-        ExpressionToInsts.insert({E, {&I}});
-        ExpressionToBlocks.insert({E, {B}});
-      } else {
-        ExpressionToInsts[E].insert(&I);
-        ExpressionToBlocks[E].insert(B);
-      }
-    }
-  }
-
-  DEBUG(
-      dbgs() << "\nExpressionsToInts\n";
-      for (auto &P : ExpressionToInsts) {
-        dbgs() << "(" << P.getSecond().size() << ") ";
-        P.getFirst()->printInternal(dbgs());
-        dbgs() << ":";
-        for (const auto &I : P.getSecond()) {
-          dbgs() << "\n" << *I;
-        }
-        dbgs() << "\n";
-      }
-  );
-
   // STEP 1: F-Insertion
   // Factors are inserted in two cases:
   //   - for each block in expressions IDF
   //   - for each phi of expression operand, which indicates expression alteration
-  for (auto &P : ExpressionToInsts) {
-    auto &E = P.getFirst();
-    if (IgnoredExpression::classof(E) || UnknownExpression::classof(E)){
+  for (auto &P : PExprToInsts) {
+    auto &PE = P.getFirst();
+    if (IgnoredExpression::classof(PE) || UnknownExpression::classof(PE))
       continue;
-    }
 
     SmallVector<BasicBlock *, 32> IDF;
     ForwardIDFCalculator IDFs(*DT);
-    IDFs.setDefiningBlocks(ExpressionToBlocks[E]);
+    IDFs.setDefiningBlocks(PExprToBlocks[PE]);
     // IDFs.setLiveInBlocks(BlocksWithDeadTerminators);
     IDFs.calculate(IDF);
 
     for (const auto &B : IDF) {
-      auto F = CreateFactorExpression(*E, *B);
+      auto F = CreateFactorExpression(*PE, *B);
       if (!BlockToFactors.count(B)) {
         BlockToFactors.insert({B, {F}});
       } else {
@@ -507,7 +521,7 @@ SSAPRE::runImpl(Function &F, AssumptionCache &_AC,
       }
     }
 
-    if (const auto *BE = dyn_cast<const BasicExpression>(E)) {
+    if (const auto *BE = dyn_cast<const BasicExpression>(PE)) {
       for (auto &O : BE->getOperands()) {
         if (const auto *PHI = dyn_cast<const PHINode>(O)) {
           // TODO
@@ -515,7 +529,7 @@ SSAPRE::runImpl(Function &F, AssumptionCache &_AC,
           // operands since expressions by itself do not identify a phi-ud graph
           // as a single variable that changes over time
           auto B = PHI->getParent();
-          auto F = CreateFactorExpression(*E, *B);
+          auto F = CreateFactorExpression(*PE, *B);
           if (!BlockToFactors.count(B)) {
             BlockToFactors.insert({B, {F}});
           } else {
@@ -527,7 +541,7 @@ SSAPRE::runImpl(Function &F, AssumptionCache &_AC,
   }
 
   DEBUG(
-      dbgs() << "BlockToFactors\n";
+      dbgs() << "\nBlockToFactors\n";
       for (auto &P : BlockToFactors) {
         dbgs() << "(" << P.getSecond().size() << ") ";
         P.getFirst()->printAsOperand(dbgs(), false);
@@ -542,19 +556,114 @@ SSAPRE::runImpl(Function &F, AssumptionCache &_AC,
 
 
   // STEP 2: Rename
-  // We assign SSA versions to each factor definition
-  std::stack<const Expression *> ExpressionsStack;
-  DFI = df_begin(DT->getRootNode());
-  for (auto DFE = df_end(DT->getRootNode()); DFI != DFE; ++DFI) {
-    auto B = DFI->getBlock();
+  // We assign SSA versions to each of 3 kinds of expressions:
+  //   - Real expression
+  //   - Factor expression
+  //   - Factor operands, these generally versioned as Bottom
+  DenseMap<const Expression *, std::stack<std::pair<unsigned, Expression *>>>
+    PExprToVExprStack;
+  for (auto B : RPOT) {
+    // Since factors live outside basick blocks we set theirs DFS as the first
+    // instruction's in the block
+    auto FSDFS = InstrSDFS[&B->front()];
+
+    for (auto FE : BlockToFactors[B]) {
+      auto &C = PExprToRC[&FE->getPExpr()];
+
+      // Set Factor version
+      FE->setVersion(C.Counter++);
+
+      // Push VExpr onto stack Expr stack
+      if (!PExprToVExprStack.count(FE)) {
+        PExprToVExprStack.insert({FE, {}});
+      }
+      PExprToVExprStack[FE].push({FSDFS, FE});
+    }
+
     for (auto &I : *B) {
-      if (I.isTerminator()) continue;
-      auto &E = InstToExpression[&I];
-      auto &C = RenamingContexts[E];
-      E->setVerion(C.Counter++);
-      ExpressionsStack.push(E);
+      auto &VE = InstToVExpr[&I];
+      auto &PE = VExprToPExpr[VE];
+
+      // For each terminator we need to visit every cfg successor of this block
+      // to update its Factor expressions
+      if (I.isTerminator()) {
+        auto *T = dyn_cast<TerminatorInst>(&I);
+        for (auto S : T->successors()) {
+          for (auto F : BlockToFactors[S]) {
+            auto &VES = PExprToVExprStack[&F->getPExpr()];
+            size_t PI = F->getPredIndex(B);
+            assert(PI != -1UL && "Should not be the case");
+            F->setVExpr(PI, VES.empty() ? &BExpr : VES.top().second);
+          }
+        }
+        break;
+      }
+
+      // Do nothing for ignored expressions
+      if (IgnoredExpression::classof(VE) || UnknownExpression::classof(VE))
+        continue;
+
+      auto SDFS = InstrSDFS[&I];
+      auto &RC = PExprToRC[PE];
+      auto &VES = PExprToVExprStack[PE];
+
+      // Backtrace every PExprs' stack if we jumped up the tree
+      for (auto &P : PExprToVExprStack) {
+        auto &VES = P.getSecond();
+        while (!VES.empty() && VES.top().first > SDFS) {
+          VES.pop();
+        }
+      }
+
+      // TODO
+      // This is a simplified version for operand comparison, normally we
+      // would check current operands on their respected stacks with operands
+      // for the VExpr on its stack, if they match we assign the same version,
+      // otherwise there was a def for VExpr operand and we need to assign a new
+      // version. This will be required when operand versioning is implemented.
+      //
+      // For now this will suffice, the only case we reuse a version if we've
+      // seen this expression before, since in SSA there is a singe def for
+      // an operand.
+      //
+      // This limits algorithm effectiveness, because we do not track operands'
+      // versions we cannot prove that certain separate expressions are in fact
+      // the same expressions of different versions. TBD, anyway.
+      //
+      // Another thing related to not tracking operand versions, because of that
+      // there always will be a single definition of VExpr's operand and the
+      // VExpr itself will follow it in the traversal, thus, for now, we do not
+      // have to assign ⊥ version to the VExpr whenever we see its operand
+      // defined.
+      auto *VESTop = VES.empty() ? nullptr : VES.top().second;
+      if (VESTop && VExprToPExpr[VESTop] == PE) {
+        // If the top of stack contains take its version
+        VE->setVersion(VESTop->getVerion());
+      } else {
+        // Otherwise assign new version
+        VE->setVersion(RC.Counter++);
+      }
+      VES.push({SDFS, VE});
     }
   }
+
+  DEBUG(
+      dbgs() << "\nBlockToFactors\n";
+      for (auto &P : BlockToFactors) {
+        dbgs() << "(" << P.getSecond().size() << ") ";
+        P.getFirst()->printAsOperand(dbgs(), false);
+        dbgs() << ":";
+        for (const auto &F : P.getSecond()) {
+          dbgs() << "\n";
+          F->printInternal(dbgs());
+          for (auto &V : F->getVExprs()) {
+            dbgs() << "\n\t";
+            V->printInternal(dbgs());
+          }
+        }
+        dbgs() << "\n";
+      }
+  );
 
   if (!Changed)
     return PreservedAnalyses::all();
