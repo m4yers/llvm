@@ -179,6 +179,7 @@ CreateUnknownExpression(Instruction &I) {
   return E;
 }
 
+
 Expression * SSAPRE::
 CreateBasicExpression(Instruction &I) {
   // auto *E = new (ExpressionAllocator) BasicExpression(I->getNumOperands());
@@ -354,8 +355,130 @@ SSAPRE::CreateExpression(Instruction &I) {
   return E;
 }
 
-PreservedAnalyses
-SSAPRE::runImpl(Function &F, AssumptionCache &_AC,
+void SSAPRE::
+PrintDebug(std::string Caption) {
+  dbgs() << "\n" << Caption << ":";
+  dbgs() << "--------------------------------------";
+  dbgs() << "\nExpressionsToInts\n";
+  for (auto &P : PExprToInsts) {
+    dbgs() << "(" << P.getSecond().size() << ") ";
+    P.getFirst()->printInternal(dbgs());
+    dbgs() << ":";
+    for (const auto &I : P.getSecond()) {
+      dbgs() << "\n" << *I;
+    }
+    dbgs() << "\n";
+  }
+
+  dbgs() << "\nORDERS DFS/SDFS";
+  for (auto &I : DFSToInstr) {
+    dbgs() << "\n" << InstrDFS[I];
+    dbgs() << "\t" << InstrSDFS[I];
+    dbgs() << "\t" << *I;
+  }
+
+  dbgs() << "\nBlockToFactors\n";
+  for (auto &P : BlockToFactors) {
+    dbgs() << "(" << P.getSecond().size() << ") ";
+    P.getFirst()->printAsOperand(dbgs(), false);
+    dbgs() << ":";
+    for (const auto &F : P.getSecond()) {
+      dbgs() << "\n";
+      F->printInternal(dbgs());
+    }
+    dbgs() << "\n";
+  }
+  dbgs() << "---------------------------------------------\n";
+}
+
+void SSAPRE::
+ResetDownSafety(FactorExpression &FE, unsigned ON) {
+  auto E = FE.getVExpr(ON);
+  if (FE.getHasRealUse(ON) || !FactorExpression::classof(E)) {
+    return;
+  }
+
+  auto *F = dyn_cast<FactorExpression>(E);
+  if (!F->getDownSafe())
+    return;
+
+  F->setDownSafe(false);
+  for (size_t i = 0, l = F->getVExprNum(); i < l; ++i) {
+    ResetDownSafety(*F, i);
+  }
+}
+
+void SSAPRE::
+DownSafety() {
+  for (auto F : FExprs) {
+    if (F->getDownSafe()) continue;
+    for (size_t i = 0, l = F->getVExprNum(); i < l; ++i) {
+      ResetDownSafety(*F, i);
+    }
+  }
+}
+
+void SSAPRE::
+ComputeCanBeAvail() {
+  for (auto F : FExprs) {
+    if (!F->getDownSafe()
+      && F->getCanBeAvail()
+      && F->getVExprIndex(&BExpr) != -1UL) {
+      ResetCanBeAvail(*F);
+    }
+  }
+}
+
+void SSAPRE::
+ResetCanBeAvail(FactorExpression &G) {
+  G.setCanBeAvail(false);
+  for (auto F : FExprs) {
+    auto I = F->getVExprIndex(&G);
+    if (I == -1UL) continue;
+    if (!F->getHasRealUse(I)) {
+      F->setVExpr(I, &BExpr);
+      if (!F->getDownSafe() && F->getCanBeAvail()) {
+        ResetCanBeAvail(*F);
+      }
+    }
+  }
+}
+
+void SSAPRE::
+ComputeLater() {
+  for (auto F : FExprs) {
+    F->setLater(F->getCanBeAvail());
+  }
+  for (auto F : FExprs) {
+    if (F->getLater()) {
+      for (size_t i = 0, l = F->getVExprs().size(); i < l; ++i) {
+        if (F->getHasRealUse(i) && F->getVExpr(i) != &BExpr) {
+          ResetLater(*F);
+          break;
+        }
+      }
+    }
+  }
+}
+
+void SSAPRE::
+ResetLater(FactorExpression &G) {
+  G.setLater(false);
+  for (auto F : FExprs) {
+    auto I = F->getVExprIndex(&G);
+    if (I == -1UL) continue;
+    if (F->getLater()) ResetLater(*F);
+  }
+}
+
+void SSAPRE::
+WillBeAvail() {
+  ComputeCanBeAvail();
+  ComputeLater();
+}
+
+PreservedAnalyses SSAPRE::
+runImpl(Function &F, AssumptionCache &_AC,
                 TargetLibraryInfo &_TLI, DominatorTree &_DT) {
   bool Changed = false;
 
@@ -393,6 +516,7 @@ SSAPRE::runImpl(Function &F, AssumptionCache &_AC,
       auto PE = CreateExpression(I);
       // This is the real versioned expression
       auto VE = CreateExpression(I);
+
       assert(PE && VE && "Oh No!");
 
       InstToVExpr.insert({&I, VE});
@@ -414,19 +538,6 @@ SSAPRE::runImpl(Function &F, AssumptionCache &_AC,
       }
     }
   }
-
-  DEBUG(
-      dbgs() << "\nExpressionsToInts\n";
-      for (auto &P : PExprToInsts) {
-        dbgs() << "(" << P.getSecond().size() << ") ";
-        P.getFirst()->printInternal(dbgs());
-        dbgs() << ":";
-        for (const auto &I : P.getSecond()) {
-          dbgs() << "\n" << *I;
-        }
-        dbgs() << "\n";
-      }
-  );
 
   // Sort dominator tree children arrays into RPO.
   for (auto &B : RPOT) {
@@ -488,15 +599,6 @@ SSAPRE::runImpl(Function &F, AssumptionCache &_AC,
     ICount += BlockRange.second - BlockRange.first;
   }
 
-  DEBUG(
-    dbgs() << "\nORDERS DFS/SDFS";
-    for (auto &I : DFSToInstr) {
-      dbgs() << "\n" << InstrDFS[I];
-      dbgs() << "\t" << InstrSDFS[I];
-      dbgs() << "\t" << *I;
-    }
-  );
-
   // STEP 1: F-Insertion
   // Factors are inserted in two cases:
   //   - for each block in expressions IDF
@@ -514,6 +616,7 @@ SSAPRE::runImpl(Function &F, AssumptionCache &_AC,
 
     for (const auto &B : IDF) {
       auto F = CreateFactorExpression(*PE, *B);
+      FExprs.insert(F);
       if (!BlockToFactors.count(B)) {
         BlockToFactors.insert({B, {F}});
       } else {
@@ -540,20 +643,7 @@ SSAPRE::runImpl(Function &F, AssumptionCache &_AC,
     }
   }
 
-  DEBUG(
-      dbgs() << "\nBlockToFactors\n";
-      for (auto &P : BlockToFactors) {
-        dbgs() << "(" << P.getSecond().size() << ") ";
-        P.getFirst()->printAsOperand(dbgs(), false);
-        dbgs() << ":";
-        for (const auto &F : P.getSecond()) {
-          dbgs() << "\n";
-          F->printInternal(dbgs());
-        }
-        dbgs() << "\n";
-      }
-  );
-
+  DEBUG(PrintDebug("STEP 1"));
 
   // STEP 2: Rename
   // We assign SSA versions to each of 3 kinds of expressions:
@@ -568,10 +658,10 @@ SSAPRE::runImpl(Function &F, AssumptionCache &_AC,
     auto FSDFS = InstrSDFS[&B->front()];
 
     for (auto FE : BlockToFactors[B]) {
-      auto &C = PExprToRC[&FE->getPExpr()];
+      auto &RC = PExprToRC[&FE->getPExpr()];
 
       // Set Factor version
-      FE->setVersion(C.Counter++);
+      FE->setVersion(RC.Counter++);
 
       // Push VExpr onto stack Expr stack
       if (!PExprToVExprStack.count(FE)) {
@@ -593,9 +683,29 @@ SSAPRE::runImpl(Function &F, AssumptionCache &_AC,
             auto &VES = PExprToVExprStack[&F->getPExpr()];
             size_t PI = F->getPredIndex(B);
             assert(PI != -1UL && "Should not be the case");
-            F->setVExpr(PI, VES.empty() ? &BExpr : VES.top().second);
+            auto &VESTop = VES.top().second;
+            F->setVExpr(PI, VES.empty() ? &BExpr : VESTop);
+
+            // STEP 3 Init: HasRealUse
+            // We set HasRealUse to True for an Factors' operands if they
+            // reference a real instruction/expression, and not some another
+            // Factor or Factor's operand definition; the last is TBD
+            F->setHasRealUse(PI, BasicExpression::classof(VESTop));
           }
         }
+
+        // FIXME Check if this is correct
+        // STEP 3 Init: DownSafe
+        // We set Factor's DownSafe safe to False if it is the last Expression's
+        // occurence before program exit.
+        if (T->getNumSuccessors() == 0) {
+          for (auto &P : PExprToVExprStack) {
+            if (auto *F = dyn_cast<FactorExpression>(P.getSecond().top().second)) {
+              F->setDownSafe(false);
+            }
+          }
+        }
+
         break;
       }
 
@@ -638,32 +748,35 @@ SSAPRE::runImpl(Function &F, AssumptionCache &_AC,
       auto *VESTop = VES.empty() ? nullptr : VES.top().second;
       if (VESTop && VExprToPExpr[VESTop] == PE) {
         // If the top of stack contains take its version
-        VE->setVersion(VESTop->getVerion());
+        VE->setVersion(VESTop->getVersion());
       } else {
         // Otherwise assign new version
         VE->setVersion(RC.Counter++);
+
+        // STEP 3 Init: DownSafe
+        // If the top of the stack contains a Factor expression we clear its
+        // DownSafe flag because its result is not used and not anticipated
+        if (VESTop && FactorExpression::classof(VESTop)) {
+          auto *F = dyn_cast<FactorExpression>(VESTop);
+          F->setDownSafe(false);
+        }
       }
+
       VES.push({SDFS, VE});
     }
   }
 
-  DEBUG(
-      dbgs() << "\nBlockToFactors\n";
-      for (auto &P : BlockToFactors) {
-        dbgs() << "(" << P.getSecond().size() << ") ";
-        P.getFirst()->printAsOperand(dbgs(), false);
-        dbgs() << ":";
-        for (const auto &F : P.getSecond()) {
-          dbgs() << "\n";
-          F->printInternal(dbgs());
-          for (auto &V : F->getVExprs()) {
-            dbgs() << "\n\t";
-            V->printInternal(dbgs());
-          }
-        }
-        dbgs() << "\n";
-      }
-  );
+  DEBUG(PrintDebug("STEP 2"));
+
+  // STEP 3 Calculating DownSafety
+  DownSafety();
+
+  DEBUG(PrintDebug("STEP 3"));
+
+  // STEP 4 Calculating WillBeAvail
+  WillBeAvail();
+
+  DEBUG(PrintDebug("STEP 4"));
 
   if (!Changed)
     return PreservedAnalyses::all();

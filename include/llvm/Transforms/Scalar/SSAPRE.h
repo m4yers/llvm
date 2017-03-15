@@ -82,7 +82,7 @@ public:
   void setOpcode(unsigned opcode) { Opcode = opcode; }
   ExpressionType getExpressionType() const { return EType; }
 
-  int getVerion() const { return Version; }
+  int getVersion() const { return Version; }
   void setVersion(int V) { Version = V; }
 
   static unsigned getEmptyKey() { return ~0U; }
@@ -299,11 +299,22 @@ private:
   SmallVector<const BasicBlock *, 8> Pred;
   SmallVector<Expression *, 8> Versions;
 
+  // If True expression is Anticipated on every path leading from this Factor
+  bool DownSafe;
+  // True if an Operand is a Real expressin and not Factor or Expression Operand
+  // definition(⊥)
+  SmallVector<bool, 8> HasRealUse;
+
+  bool CanBeAvail;
+  bool Later;
+
 public:
   FactorExpression(const Expression &PE, const BasicBlock &BB,
                    SmallVector<const BasicBlock *, 8> P)
       : Expression(ET_Factor), PE(PE), BB(BB), Pred(P),
-                   Versions(P.size(), nullptr) { }
+                   Versions(P.size(), nullptr),
+                   DownSafe(true), HasRealUse(P.size(), false),
+                   CanBeAvail(true), Later(true) { }
   FactorExpression() = delete;
   FactorExpression(const FactorExpression &) = delete;
   FactorExpression &operator=(const FactorExpression &) = delete;
@@ -320,8 +331,31 @@ public:
     return -1;
   }
 
+  size_t getVExprNum() { return Versions.size(); }
   void setVExpr(unsigned P, Expression * V) { Versions[P] = V; }
+  Expression * getVExpr(unsigned P) { return Versions[P]; }
+  size_t getVExprIndex(Expression * V) {
+    for(size_t i = 0, l = Versions.size(); i < l; ++i) {
+      if (Versions[i] == V) 
+        return i;
+    }
+    return -1;
+  }
   SmallVector<Expression *, 8> getVExprs() { return Versions; };
+
+  bool getDownSafe() const { return DownSafe; }
+  void setDownSafe(bool DS) { DownSafe = DS; }
+
+  bool getCanBeAvail() const { return CanBeAvail; }
+  void setCanBeAvail(bool CBA) { CanBeAvail = CBA; }
+
+  bool getLater() const { return Later; }
+  void setLater(bool L) { Later = L; }
+
+  bool getWillBeAvail() const { return CanBeAvail && !Later; }
+
+  void setHasRealUse(unsigned P, bool HRU) { HasRealUse[P] = HRU; }
+  bool getHasRealUse(unsigned P) const { return HasRealUse[P]; }
 
   static bool classof(const Expression *EB) {
     return EB->getExpressionType() == ET_Factor;
@@ -350,15 +384,23 @@ public:
        << ", V = <";
     for (unsigned i = 0, l = Versions.size(); i < l; ++i) {
       if (Versions[i]) {
-        OS << Versions[i]->getVerion();
+        OS << Versions[i]->getVersion();
       } else {
         OS << "⊥";
       }
-      if (i + 1 != l) {
-        OS << ",";
-      }
+      if (i + 1 != l) OS << ",";
     }
     OS << ">";
+    OS << ", DS: " << (DownSafe ? "T" : "F");
+    OS << ", HRU: <";
+    for (unsigned i = 0, l = HasRealUse.size(); i < l; ++i) {
+      OS << (HasRealUse[i] ? "T" : "F");
+      if (i + 1 != l) OS << ",";
+    }
+    OS << ">";
+    OS << ", CBA: " << (CanBeAvail ? "T" : "F");
+    OS << ", L: " << (Later ? "T" : "F");
+    OS << ", WBA: " << (getWillBeAvail() ? "T" : "F");
   }
 }; // class FactorExpression
 
@@ -436,6 +478,8 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
   // VersionedExpression-to-ProtoVersioned
   DenseMap<Expression *, const Expression *> VExprToPExpr;
 
+  SmallPtrSet<FactorExpression *, 32> FExprs;
+
 public:
   PreservedAnalyses run(Function &F, AnalysisManager<Function> &AM);
 
@@ -474,6 +518,18 @@ private:
   FactorExpression * CreateFactorExpression(const Expression &E,
                                             const BasicBlock &B);
   Expression * CreateExpression(Instruction &I);
+
+  void ResetDownSafety(FactorExpression &F, unsigned O);
+  void DownSafety();
+
+  void ComputeCanBeAvail();
+  void ResetCanBeAvail(FactorExpression &F);
+  void ComputeLater();
+  void ResetLater(FactorExpression &F);
+  void WillBeAvail();
+
+  void PrintDebug(std::string Caption);
+
   PreservedAnalyses runImpl(Function &F, AssumptionCache &_AC,
                             TargetLibraryInfo &_TLI, DominatorTree &_DT);
 };
