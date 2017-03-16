@@ -70,6 +70,9 @@ private:
   unsigned Opcode;
   int Version;
 
+  bool Save;
+  bool Reload;
+
 public:
   Expression(ExpressionType ET = ET_Base, unsigned O = ~2U)
       : ID(LastID++), EType(ET), Opcode(O), Version(-1) {}
@@ -84,6 +87,12 @@ public:
 
   int getVersion() const { return Version; }
   void setVersion(int V) { Version = V; }
+
+  int getSave() const { return Save; }
+  void setSave(int S) { Save = S; }
+
+  int getReload() const { return Reload; }
+  void setReload(int R) { Reload = R; }
 
   static unsigned getEmptyKey() { return ~0U; }
   static unsigned getTombstoneKey() { return ~1U; }
@@ -116,6 +125,8 @@ public:
   virtual void printInternal(raw_ostream &OS) const {
     OS << ExpressionTypeToString(getExpressionType());
     OS << ", V: " << Version;
+    OS << ", S: " << (Save ? "T" : "F");
+    OS << ", R: " << (Reload ? "T" : "F");
     OS << ", OPC: " << getOpcode() << ", ";
   }
 
@@ -336,7 +347,7 @@ public:
   Expression * getVExpr(unsigned P) { return Versions[P]; }
   size_t getVExprIndex(Expression * V) {
     for(size_t i = 0, l = Versions.size(); i < l; ++i) {
-      if (Versions[i] == V) 
+      if (Versions[i] == V)
         return i;
     }
     return -1;
@@ -462,6 +473,7 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
 
   // Instruction-to-Expression map
   DenseMap<const Instruction *, Expression *> InstToVExpr;
+  DenseMap<Expression *, const Instruction *> VExprToInst;
 
   // ProtoExpression-to-Instructions map
   DenseMap<const Expression *, SmallPtrSet<const Instruction *, 5>> PExprToInsts;
@@ -479,6 +491,10 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
   DenseMap<Expression *, const Expression *> VExprToPExpr;
 
   SmallPtrSet<FactorExpression *, 32> FExprs;
+
+  DenseMap<const Expression *, DenseMap<int, Expression *>> AvailDef;
+
+  DenseMap<const BasicBlock *, SmallPtrSet<const Expression *, 5>> BlockToInserts;
 
 public:
   PreservedAnalyses run(Function &F, AnalysisManager<Function> &AM);
@@ -527,6 +543,8 @@ private:
   void ComputeLater();
   void ResetLater(FactorExpression &F);
   void WillBeAvail();
+
+  void FinalizeVisit(BasicBlock &B);
 
   void PrintDebug(std::string Caption);
 

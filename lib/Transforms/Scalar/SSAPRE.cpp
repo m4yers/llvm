@@ -388,6 +388,19 @@ PrintDebug(std::string Caption) {
     }
     dbgs() << "\n";
   }
+
+  dbgs() << "\nBlockToInserts\n";
+    for (auto &P : BlockToInserts) {
+      dbgs() << "(" << P.getSecond().size() << ") ";
+      P.getFirst()->printAsOperand(dbgs(), false);
+      dbgs() << ":";
+      for (const auto &F : P.getSecond()) {
+        dbgs() << "\n";
+        F->printInternal(dbgs());
+      }
+      dbgs() << "\n";
+    }
+
   dbgs() << "---------------------------------------------\n";
 }
 
@@ -477,6 +490,86 @@ WillBeAvail() {
   ComputeLater();
 }
 
+void SSAPRE::
+FinalizeVisit(BasicBlock &B) {
+  for (auto F : BlockToFactors[&B]) {
+    F->setSave(false);
+    F->setReload(false);
+    auto V = F->getVersion();
+    if (F->getWillBeAvail()) {
+      auto &PE = F->getPExpr();
+      if (!AvailDef.count(&PE)) {
+          AvailDef.insert({&PE, DenseMap<int,Expression*>()});
+          AvailDef[&PE][V] = F;
+      } else if (!AvailDef[&PE].count(V)) {
+          AvailDef[&PE].insert({V, F});
+      } else {
+        AvailDef[&PE][V] = F;
+      }
+    }
+  }
+
+  for (auto &I : B) {
+    auto &VE = InstToVExpr[&I];
+    auto &PE = VExprToPExpr[VE];
+    if (I.isTerminator() ||
+        IgnoredExpression::classof(VE) ||
+        UnknownExpression::classof(VE))
+      continue;
+
+    VE->setSave(false);
+    VE->setReload(false);
+    auto V = VE->getVersion();
+
+    if (AvailDef.count(PE)) {
+      auto ADE = AvailDef[PE];
+      // FIXME Check whether dominance is not strict
+      if (!ADE.count(V) || DT->dominates(VExprToInst[ADE[V]], VExprToInst[VE])) {
+        ADE[V] = VE;
+      } else if (BasicExpression::classof(ADE[V])) {
+        ADE[V]->setSave(true);
+        VE->setReload(true);
+      }
+    }
+
+    if (I.isTerminator()) {
+      auto *T = dyn_cast<TerminatorInst>(&I);
+      for (auto S : T->successors()) {
+          for (auto F : BlockToFactors[S]) {
+            if (F->getWillBeAvail()) {
+              auto &PE = F->getPExpr();
+              unsigned PI = F->getPredIndex(&B);
+              auto O = F->getVExpr(PI);
+              // Satisfies insert if either:
+              //   - Version(O) is ⊥
+              //   - HRU(O) is False and O is Factor and WBA(O) is False
+              if (O == &BExpr ||
+                  (!F->getHasRealUse(PI) &&
+                   FactorExpression::classof(O) &&
+                   !dyn_cast<FactorExpression>(O)->getWillBeAvail())) {
+                // Insert the Expression at the of B
+                if (!BlockToInserts.count(&B)) {
+                  BlockToInserts.insert({&B, {&PE}});
+                } else {
+                  BlockToInserts[&B].insert(&PE);
+                }
+              } else {
+                auto OV = O->getVersion();
+                if (AvailDef.count(&PE)) {
+                  auto &ADPE = AvailDef[&PE];
+                  if (BasicExpression::classof(ADPE[OV])) {
+                    ADPE[OV]->setSave(true);
+                  }
+                }
+              }
+            }
+          }
+      }
+      break;
+    }
+  }
+}
+
 PreservedAnalyses SSAPRE::
 runImpl(Function &F, AssumptionCache &_AC,
                 TargetLibraryInfo &_TLI, DominatorTree &_DT) {
@@ -520,6 +613,7 @@ runImpl(Function &F, AssumptionCache &_AC,
       assert(PE && VE && "Oh No!");
 
       InstToVExpr.insert({&I, VE});
+      VExprToInst.insert({VE, &I});
       VExprToPExpr[VE] = PE;
       if (!PExprToVExprs.count(PE)) {
         PExprToVExprs.insert({PE, {VE}});
@@ -777,6 +871,13 @@ runImpl(Function &F, AssumptionCache &_AC,
   WillBeAvail();
 
   DEBUG(PrintDebug("STEP 4"));
+
+  // STEP 5 Finalize
+  for (auto B : RPOT) {
+    FinalizeVisit(*B);
+  }
+
+  DEBUG(PrintDebug("STEP 5"));
 
   if (!Changed)
     return PreservedAnalyses::all();
