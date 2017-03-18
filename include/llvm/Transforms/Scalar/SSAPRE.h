@@ -543,6 +543,14 @@ private:
                                             const BasicBlock &B);
   Expression * CreateExpression(Instruction &I);
 
+  bool IgnoreExpression(const Expression &E);
+
+  void PrintDebug(const std::string &Caption);
+
+  void FactorInsertion();
+
+  void Rename();
+
   void ResetDownSafety(FactorExpression &F, unsigned O);
   void DownSafety();
 
@@ -553,10 +561,9 @@ private:
   void WillBeAvail();
 
   void FinalizeVisit(BasicBlock &B);
+  void Finalize();
 
   bool CodeMotion();
-
-  void PrintDebug(std::string Caption);
 
   PreservedAnalyses runImpl(Function &F, AssumptionCache &_AC,
                             TargetLibraryInfo &_TLI, DominatorTree &_DT);

@@ -284,6 +284,10 @@ CreateFactorExpression(const Expression &E, const BasicBlock &B) {
 
 Expression *
 SSAPRE::CreateExpression(Instruction &I) {
+  if (I.isTerminator()) {
+    return CreateIgnoredExpression(I);
+  }
+
   Expression * E = nullptr;
   switch (I.getOpcode()) {
   case Instruction::ExtractValue:
@@ -355,8 +359,14 @@ SSAPRE::CreateExpression(Instruction &I) {
   return E;
 }
 
+bool SSAPRE::
+IgnoreExpression(const Expression &E) {
+  auto ET = E.getExpressionType();
+  return ET == ET_Ignored || ET == ET_Unknown;
+}
+
 void SSAPRE::
-PrintDebug(std::string Caption) {
+PrintDebug(const std::string &Caption) {
   dbgs() << "\n" << Caption << ":";
   dbgs() << "--------------------------------------";
   dbgs() << "\nExpressionsToInts\n";
@@ -412,6 +422,187 @@ PrintDebug(std::string Caption) {
     }
 
   dbgs() << "---------------------------------------------\n";
+}
+
+void SSAPRE::
+FactorInsertion() {
+  // Factors are inserted in two cases:
+  //   - for each block in expressions IDF
+  //   - for each phi of expression operand, which indicates expression alteration
+  for (auto &P : PExprToInsts) {
+    auto &PE = P.getFirst();
+    if (IgnoredExpression::classof(PE) || UnknownExpression::classof(PE))
+      continue;
+
+    SmallVector<BasicBlock *, 32> IDF;
+    ForwardIDFCalculator IDFs(*DT);
+    IDFs.setDefiningBlocks(PExprToBlocks[PE]);
+    // IDFs.setLiveInBlocks(BlocksWithDeadTerminators);
+    IDFs.calculate(IDF);
+
+    for (const auto &B : IDF) {
+      auto F = CreateFactorExpression(*PE, *B);
+      FExprs.insert(F);
+      if (!BlockToFactors.count(B)) {
+        BlockToFactors.insert({B, {F}});
+      } else {
+        BlockToFactors[B].insert({F});
+      }
+    }
+
+    if (const auto *BE = dyn_cast<const BasicExpression>(PE)) {
+      for (auto &O : BE->getOperands()) {
+        if (const auto *PHI = dyn_cast<const PHINode>(O)) {
+          // TODO
+          // At this point we do not traverse phi-ud graph for expression's
+          // operands since expressions by itself do not identify a phi-ud graph
+          // as a single variable that changes over time
+          auto B = PHI->getParent();
+          auto F = CreateFactorExpression(*PE, *B);
+          if (!BlockToFactors.count(B)) {
+            BlockToFactors.insert({B, {F}});
+          } else {
+            BlockToFactors[B].insert({F});
+          }
+        }
+      }
+    }
+  }
+}
+
+void SSAPRE::
+Rename() {
+  // We assign SSA versions to each of 3 kinds of expressions:
+  //   - Real expression
+  //   - Factor expression
+  //   - Factor operands, these generally versioned as Bottom
+
+  // The counters are used to number expression versions during DFS walk. Before
+  // the renaming phase each instruction(that we do not ignore) is of a proto
+  // type(PExpr), after this walk every expression is assign its own version and
+  // it becomes a versioned(or instantiated) expression(VExpr).
+  DenseMap<const Expression *, int> PExprToCounter;
+  for (auto &P : PExprToInsts) PExprToCounter.insert({P.getFirst(), 0});
+
+  // Each PExpr is mapped to a stack of VExpr that grow and shrink during DFS
+  // walk. Tops of these stacks are used to name a recent expression occurrence
+  // as a Factor operand.
+  DenseMap<const Expression *, std::stack<std::pair<unsigned, Expression *>>>
+    PExprToVExprStack;
+
+  for (auto &P : PExprToInsts) {
+    auto &PE = P.getFirst();
+    if (IgnoreExpression(*PE))
+      continue;
+    PExprToCounter.insert({PE, 0});
+    PExprToVExprStack.insert({PE, {}});
+  }
+
+  for (auto B : *RPOT) {
+    // Since factors live outside basic blocks we set theirs DFS as the first
+    // instruction's in the block
+    auto FSDFS = InstrSDFS[&B->front()];
+
+    for (auto FE : BlockToFactors[B]) {
+      // Set Factor version
+      auto &PE = FE->getPExpr();
+      FE->setVersion(PExprToCounter[&PE]++);
+
+      // Push VExpr onto stack Expr stack
+      PExprToVExprStack[&PE].push({FSDFS, FE});
+    }
+
+    for (auto &I : *B) {
+      auto &VE = InstToVExpr[&I];
+      auto &PE = VExprToPExpr[VE];
+
+      // Do nothing for ignored expressions
+      if (IgnoreExpression(*VE))
+        continue;
+
+      auto SDFS = InstrSDFS[&I];
+      auto &VEStack = PExprToVExprStack[PE];
+
+      // Backtrace every PExprs' stack if we jumped up the tree
+      for (auto &P : PExprToVExprStack) {
+        auto &VEStack = P.getSecond();
+        while (!VEStack.empty() && VEStack.top().first > SDFS) {
+          VEStack.pop();
+        }
+      }
+
+      // TODO
+      // This is a simplified version for operand comparison, normally we
+      // would check current operands on their respected stacks with operands
+      // for the VExpr on its stack, if they match we assign the same version,
+      // otherwise there was a def for VExpr operand and we need to assign a new
+      // version. This will be required when operand versioning is implemented.
+      //
+      // For now this will suffice, the only case we reuse a version if we've
+      // seen this expression before, since in SSA there is a singe def for
+      // an operand.
+      //
+      // This limits algorithm effectiveness, because we do not track operands'
+      // versions we cannot prove that certain separate expressions are in fact
+      // the same expressions of different versions. TBD, anyway.
+      //
+      // Another thing related to not tracking operand versions, because of that
+      // there always will be a single definition of VExpr's operand and the
+      // VExpr itself will follow it in the traversal, thus, for now, we do not
+      // have to assign ⊥ version to the VExpr whenever we see its operand
+      // defined.
+      auto *VESTop = VEStack.empty() ? nullptr : VEStack.top().second;
+      if (VESTop && VExprToPExpr[VESTop] == PE) {
+        // If the top of stack contains take its version
+        VE->setVersion(VESTop->getVersion());
+      } else {
+        // Otherwise assign new version
+        VE->setVersion(PExprToCounter[PE]++);
+
+        // STEP 3 Init: DownSafe
+        // If the top of the stack contains a Factor expression we clear its
+        // DownSafe flag because its result is not used and not anticipated
+        if (VESTop && FactorExpression::classof(VESTop)) {
+          auto *F = dyn_cast<FactorExpression>(VESTop);
+          F->setDownSafe(false);
+        }
+      }
+
+      VEStack.push({SDFS, VE});
+    }
+
+    // For a terminator we need to visit every cfg successor of this block
+    // to update its Factor expressions
+    auto *T = B->getTerminator();
+    for (auto S : T->successors()) {
+      for (auto F : BlockToFactors[S]) {
+        auto &VEStack = PExprToVExprStack[&F->getPExpr()];
+        size_t PI = F->getPredIndex(B);
+        assert(PI != -1UL && "Should not be the case");
+        auto &VESTop = VEStack.top().second;
+        F->setVExpr(PI, VEStack.empty() ? &BExpr : VESTop);
+
+        // STEP 3 Init: HasRealUse
+        // We set HasRealUse to True for an Factors' operands if they
+        // reference a real instruction/expression, and not some another
+        // Factor or Factor's operand definition; the last is TBD
+        F->setHasRealUse(PI, BasicExpression::classof(VESTop));
+      }
+    }
+
+    // FIXME Check if this is correct
+    // STEP 3 Init: DownSafe
+    // We set Factor's DownSafe safe to False if it is the last Expression's
+    // occurence before program exit.
+    if (T->getNumSuccessors() == 0) {
+      for (auto &P : PExprToVExprStack) {
+        auto &VEStack = P.getSecond();
+        if (auto *F = dyn_cast<FactorExpression>(VEStack.top().second)) {
+          F->setDownSafe(false);
+        }
+      }
+    }
+  }
 }
 
 void SSAPRE::
@@ -580,6 +771,13 @@ FinalizeVisit(BasicBlock &B) {
   }
 }
 
+void SSAPRE::
+Finalize() {
+  for (auto B : *RPOT) {
+    FinalizeVisit(*B);
+  }
+}
+
 bool SSAPRE::
 CodeMotion() {
   bool Changed = false;
@@ -616,10 +814,10 @@ CodeMotion() {
         auto *T = dyn_cast<TerminatorInst>(&I);
         for (auto S : T->successors()) {
           for (auto F : BlockToFactors[S]) {
-            auto &VES = PExprToVExprStack[&F->getPExpr()];
+            auto &VEStack = PExprToVExprStack[&F->getPExpr()];
             size_t PI = F->getPredIndex(B);
             assert(PI != -1UL && "Should not be the case");
-            F->setVExpr(PI, VES.empty() ? &BExpr : VES.top().second);
+            F->setVExpr(PI, VEStack.empty() ? &BExpr : VEStack.top().second);
           }
         }
 
@@ -631,21 +829,21 @@ CodeMotion() {
         continue;
 
       auto SDFS = InstrSDFS[&I];
-      auto &VES = PExprToVExprStack[PE];
+      auto &VEStack = PExprToVExprStack[PE];
 
       // Backtrace every PExprs' stack if we jumped up the tree
       for (auto &P : PExprToVExprStack) {
-        auto &VES = P.getSecond();
-        while (!VES.empty() && VES.top().first > SDFS) {
-          VES.pop();
+        auto &VEStack = P.getSecond();
+        while (!VEStack.empty() && VEStack.top().first > SDFS) {
+          VEStack.pop();
         }
       }
 
       if (VE->getSave()) {
         // Leave it be
-        VES.push({SDFS, VE});
+        VEStack.push({SDFS, VE});
       } else if (VE->getReload()) {
-        auto *VESTop = VES.empty() ? nullptr : VES.top().second;
+        auto *VESTop = VEStack.empty() ? nullptr : VEStack.top().second;
         assert(VESTop && "This must not be null");
         assert(VESTop->getSave() && "This Value must be saved");
         auto &RI = VExprToInst[VESTop];
@@ -699,9 +897,9 @@ CodeMotion() {
         auto BE = dyn_cast<BasicExpression>(&F->getPExpr());
         auto PHI = Builder.CreatePHI(BE->getType(), F->getVExprNum());
         for (unsigned i = 0, l = F->getVExprNum(); i < l; ++i) {
-          auto VES = PExprToVExprStack[&F->getPExpr()];
-          assert(!VES.empty() && "VES must not be empty");
-          auto VESTop = VES.top().second;
+          auto VEStack = PExprToVExprStack[&F->getPExpr()];
+          assert(!VEStack.empty() && "VEStack must not be empty");
+          auto VESTop = VEStack.top().second;
           PHI->setIncomingValue(i, VExprToInst[VESTop]);
         }
         Changed = true;
@@ -727,9 +925,6 @@ runImpl(Function &F,
   unsigned ICount = 1;
   // DFSToInstr.emplace_back(nullptr);
 
-  // This is used during renaming step
-  DenseMap<const Expression *, FactorRenamingContext> PExprToRC;
-
   RPOT = new ReversePostOrderTraversal<Function *>(&F);
 
   DenseMap<const DomTreeNode *, unsigned> RPOOrdering;
@@ -743,9 +938,6 @@ runImpl(Function &F,
 
     // Collect all the expressions
     for (auto &I : *B) {
-      // We map every instruction except terminators
-      if (I.isTerminator()) continue;
-
       // Create ProtoExpresison, this expression will not be versioned and used
       // to bind Versioned Expressions of the same kind/class.
       auto PE = CreateExpression(I);
@@ -765,7 +957,6 @@ runImpl(Function &F,
 
       // Map Proto-to-Reals and Proto-to-Blocks
       if (!PExprToInsts.count(PE)) {
-        PExprToRC.insert({PE, {}});
         PExprToInsts.insert({PE, {&I}});
         PExprToBlocks.insert({PE, {B}});
       } else {
@@ -835,195 +1026,23 @@ runImpl(Function &F,
     ICount += BlockRange.second - BlockRange.first;
   }
 
-  // STEP 1: F-Insertion
-  // Factors are inserted in two cases:
-  //   - for each block in expressions IDF
-  //   - for each phi of expression operand, which indicates expression alteration
-  for (auto &P : PExprToInsts) {
-    auto &PE = P.getFirst();
-    if (IgnoredExpression::classof(PE) || UnknownExpression::classof(PE))
-      continue;
 
-    SmallVector<BasicBlock *, 32> IDF;
-    ForwardIDFCalculator IDFs(*DT);
-    IDFs.setDefiningBlocks(PExprToBlocks[PE]);
-    // IDFs.setLiveInBlocks(BlocksWithDeadTerminators);
-    IDFs.calculate(IDF);
-
-    for (const auto &B : IDF) {
-      auto F = CreateFactorExpression(*PE, *B);
-      FExprs.insert(F);
-      if (!BlockToFactors.count(B)) {
-        BlockToFactors.insert({B, {F}});
-      } else {
-        BlockToFactors[B].insert({F});
-      }
-    }
-
-    if (const auto *BE = dyn_cast<const BasicExpression>(PE)) {
-      for (auto &O : BE->getOperands()) {
-        if (const auto *PHI = dyn_cast<const PHINode>(O)) {
-          // TODO
-          // At this point we do not traverse phi-ud graph for expression's
-          // operands since expressions by itself do not identify a phi-ud graph
-          // as a single variable that changes over time
-          auto B = PHI->getParent();
-          auto F = CreateFactorExpression(*PE, *B);
-          if (!BlockToFactors.count(B)) {
-            BlockToFactors.insert({B, {F}});
-          } else {
-            BlockToFactors[B].insert({F});
-          }
-        }
-      }
-    }
-  }
-
+  FactorInsertion();
   DEBUG(PrintDebug("STEP 1"));
 
-  // STEP 2: Rename
-  // We assign SSA versions to each of 3 kinds of expressions:
-  //   - Real expression
-  //   - Factor expression
-  //   - Factor operands, these generally versioned as Bottom
-  DenseMap<const Expression *, std::stack<std::pair<unsigned, Expression *>>>
-    PExprToVExprStack;
-  for (auto B : *RPOT) {
-    // Since factors live outside basick blocks we set theirs DFS as the first
-    // instruction's in the block
-    auto FSDFS = InstrSDFS[&B->front()];
-
-    for (auto FE : BlockToFactors[B]) {
-      auto &RC = PExprToRC[&FE->getPExpr()];
-
-      // Set Factor version
-      FE->setVersion(RC.Counter++);
-
-      // Push VExpr onto stack Expr stack
-      if (!PExprToVExprStack.count(FE)) {
-        PExprToVExprStack.insert({FE, {}});
-      }
-      PExprToVExprStack[FE].push({FSDFS, FE});
-    }
-
-    for (auto &I : *B) {
-      auto &VE = InstToVExpr[&I];
-      auto &PE = VExprToPExpr[VE];
-
-      // For each terminator we need to visit every cfg successor of this block
-      // to update its Factor expressions
-      if (I.isTerminator()) {
-        auto *T = dyn_cast<TerminatorInst>(&I);
-        for (auto S : T->successors()) {
-          for (auto F : BlockToFactors[S]) {
-            auto &VES = PExprToVExprStack[&F->getPExpr()];
-            size_t PI = F->getPredIndex(B);
-            assert(PI != -1UL && "Should not be the case");
-            auto &VESTop = VES.top().second;
-            F->setVExpr(PI, VES.empty() ? &BExpr : VESTop);
-
-            // STEP 3 Init: HasRealUse
-            // We set HasRealUse to True for an Factors' operands if they
-            // reference a real instruction/expression, and not some another
-            // Factor or Factor's operand definition; the last is TBD
-            F->setHasRealUse(PI, BasicExpression::classof(VESTop));
-          }
-        }
-
-        // FIXME Check if this is correct
-        // STEP 3 Init: DownSafe
-        // We set Factor's DownSafe safe to False if it is the last Expression's
-        // occurence before program exit.
-        if (T->getNumSuccessors() == 0) {
-          for (auto &P : PExprToVExprStack) {
-            if (auto *F = dyn_cast<FactorExpression>(P.getSecond().top().second)) {
-              F->setDownSafe(false);
-            }
-          }
-        }
-
-        break;
-      }
-
-      // Do nothing for ignored expressions
-      if (IgnoredExpression::classof(VE) || UnknownExpression::classof(VE))
-        continue;
-
-      auto SDFS = InstrSDFS[&I];
-      auto &RC = PExprToRC[PE];
-      auto &VES = PExprToVExprStack[PE];
-
-      // Backtrace every PExprs' stack if we jumped up the tree
-      for (auto &P : PExprToVExprStack) {
-        auto &VES = P.getSecond();
-        while (!VES.empty() && VES.top().first > SDFS) {
-          VES.pop();
-        }
-      }
-
-      // TODO
-      // This is a simplified version for operand comparison, normally we
-      // would check current operands on their respected stacks with operands
-      // for the VExpr on its stack, if they match we assign the same version,
-      // otherwise there was a def for VExpr operand and we need to assign a new
-      // version. This will be required when operand versioning is implemented.
-      //
-      // For now this will suffice, the only case we reuse a version if we've
-      // seen this expression before, since in SSA there is a singe def for
-      // an operand.
-      //
-      // This limits algorithm effectiveness, because we do not track operands'
-      // versions we cannot prove that certain separate expressions are in fact
-      // the same expressions of different versions. TBD, anyway.
-      //
-      // Another thing related to not tracking operand versions, because of that
-      // there always will be a single definition of VExpr's operand and the
-      // VExpr itself will follow it in the traversal, thus, for now, we do not
-      // have to assign ⊥ version to the VExpr whenever we see its operand
-      // defined.
-      auto *VESTop = VES.empty() ? nullptr : VES.top().second;
-      if (VESTop && VExprToPExpr[VESTop] == PE) {
-        // If the top of stack contains take its version
-        VE->setVersion(VESTop->getVersion());
-      } else {
-        // Otherwise assign new version
-        VE->setVersion(RC.Counter++);
-
-        // STEP 3 Init: DownSafe
-        // If the top of the stack contains a Factor expression we clear its
-        // DownSafe flag because its result is not used and not anticipated
-        if (VESTop && FactorExpression::classof(VESTop)) {
-          auto *F = dyn_cast<FactorExpression>(VESTop);
-          F->setDownSafe(false);
-        }
-      }
-
-      VES.push({SDFS, VE});
-    }
-  }
-
+  Rename();
   DEBUG(PrintDebug("STEP 2"));
 
-  // STEP 3 Calculating DownSafety
   DownSafety();
-
   DEBUG(PrintDebug("STEP 3"));
 
-  // STEP 4 Calculating WillBeAvail
   WillBeAvail();
-
   DEBUG(PrintDebug("STEP 4"));
 
-  // STEP 5 Finalize
-  for (auto B : *RPOT) {
-    FinalizeVisit(*B);
-  }
-
+  Finalize();
   DEBUG(PrintDebug("STEP 5"));
 
-  // STEP 6 Code Motion
   Changed = CodeMotion();
-
   DEBUG(PrintDebug("STEP 6"));
 
   if (!Changed)
