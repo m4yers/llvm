@@ -425,13 +425,120 @@ PrintDebug(const std::string &Caption) {
 }
 
 void SSAPRE::
+Init() {
+  unsigned ICount = 1;
+  // DFSToInstr.emplace_back(nullptr);
+
+  DenseMap<const DomTreeNode *, unsigned> RPOOrdering;
+  unsigned Counter = 0;
+  for (auto &B : *RPOT) {
+    auto *Node = DT->getNode(B);
+    assert(Node && "RPO and Dominator tree should have same reachability");
+
+    // Assign each block RPO index
+    RPOOrdering[Node] = ++Counter;
+
+    // Collect all the expressions
+    for (auto &I : *B) {
+      // Create ProtoExpresison, this expression will not be versioned and used
+      // to bind Versioned Expressions of the same kind/class.
+      auto PE = CreateExpression(I);
+      // This is the real versioned expression
+      auto VE = CreateExpression(I);
+
+      assert(PE && VE && "Oh No!");
+
+      BlockToFactors.insert({B, {}});
+      InstToVExpr.insert({&I, VE});
+      VExprToInst.insert({VE, &I});
+      VExprToPExpr[VE] = PE;
+
+      if (!PExprToVExprs.count(PE)) {
+        PExprToVExprs.insert({PE, {VE}});
+      } else {
+        PExprToVExprs[PE].insert(VE);
+      }
+
+      // Map Proto-to-Reals and Proto-to-Blocks
+      if (!PExprToInsts.count(PE)) {
+        PExprToInsts.insert({PE, {&I}});
+        PExprToBlocks.insert({PE, {B}});
+      } else {
+        PExprToInsts[PE].insert(&I);
+        PExprToBlocks[PE].insert(B);
+      }
+    }
+  }
+
+  // Sort dominator tree children arrays into RPO.
+  for (auto &B : *RPOT) {
+    auto *Node = DT->getNode(B);
+    if (Node->getChildren().size() > 1) {
+      std::sort(Node->begin(), Node->end(),
+                [&RPOOrdering](const DomTreeNode *A, const DomTreeNode *B) {
+                  return RPOOrdering[A] < RPOOrdering[B];
+                });
+    }
+  }
+
+  // Assign each instruction a DFS order number. This will be the main order
+  // we traverse DT in.
+  auto DFI = df_begin(DT->getRootNode());
+  for (auto DFE = df_end(DT->getRootNode()); DFI != DFE; ++DFI) {
+    BasicBlock *B = DFI->getBlock();
+    const auto &BlockRange = AssignDFSNumbers(B, ICount, &InstrDFS, &DFSToInstr);
+    // BlockInstRange.insert({B, BlockRange});
+    ICount += BlockRange.second - BlockRange.first;
+  }
+
+  // Now we need to create Reverse Sorted Dominator Tree, where siblings sorted
+  // in the opposite to RPO order. This order will give us a clue when during
+  // the normal traversal we go up the tree. For example:
+  //
+  //   CFG:    DT:
+  //
+  //    a       a     RPO(CFG): { a, c, b, d, e } // normal cfg rpo
+  //   / \    / | \   DFS(DT):  { a, b, d, e, c } // before reorder
+  //  b   c  b  d  c  DFS(DT):  { a, c, b, d, e } // after reorder
+  //   \ /      |
+  //    d       e     SDFS(DT): { a, d, e, b, c } // after reverse reorder
+  //    |             SDFSO(DFS(DT),SDFS(DT)): { 1, 5, 4, 2, 3 }
+  //    e                                          <  >  >  <
+  //
+  // So this SDFSO which maps our RPOish DFS(DT) onto SDFS order gives us points
+  // where we must backtrace our context(stack or whatever we keep updated).
+  // These are the places where the next SDFSO is less than the previous one.
+  //
+  for (auto &B : *RPOT) {
+    auto *Node = DT->getNode(B);
+    if (Node->getChildren().size() > 1) {
+      std::sort(Node->begin(), Node->end(),
+                [&RPOOrdering](const DomTreeNode *A, const DomTreeNode *B) {
+                  // NOTE here we are using the reversed operator
+                  return RPOOrdering[A] > RPOOrdering[B];
+                });
+    }
+  }
+
+  // Calculate Instruction-to-SDFS map
+  ICount = 1;
+  DFI = df_begin(DT->getRootNode());
+  for (auto DFE = df_end(DT->getRootNode()); DFI != DFE; ++DFI) {
+    BasicBlock *B = DFI->getBlock();
+    const auto &BlockRange = AssignDFSNumbers(B, ICount, &InstrSDFS, nullptr);
+    // BlockInstRange.insert({B, BlockRange});
+    ICount += BlockRange.second - BlockRange.first;
+  }
+}
+
+void SSAPRE::
 FactorInsertion() {
   // Factors are inserted in two cases:
   //   - for each block in expressions IDF
   //   - for each phi of expression operand, which indicates expression alteration
   for (auto &P : PExprToInsts) {
     auto &PE = P.getFirst();
-    if (IgnoredExpression::classof(PE) || UnknownExpression::classof(PE))
+    if (IgnoreExpression(*PE))
       continue;
 
     SmallVector<BasicBlock *, 32> IDF;
@@ -443,11 +550,7 @@ FactorInsertion() {
     for (const auto &B : IDF) {
       auto F = CreateFactorExpression(*PE, *B);
       FExprs.insert(F);
-      if (!BlockToFactors.count(B)) {
-        BlockToFactors.insert({B, {F}});
-      } else {
-        BlockToFactors[B].insert({F});
-      }
+      BlockToFactors[B].insert({F});
     }
 
     if (const auto *BE = dyn_cast<const BasicExpression>(PE)) {
@@ -459,11 +562,7 @@ FactorInsertion() {
           // as a single variable that changes over time
           auto B = PHI->getParent();
           auto F = CreateFactorExpression(*PE, *B);
-          if (!BlockToFactors.count(B)) {
-            BlockToFactors.insert({B, {F}});
-          } else {
-            BlockToFactors[B].insert({F});
-          }
+          BlockToFactors[B].insert({F});
         }
       }
     }
@@ -922,110 +1021,9 @@ runImpl(Function &F,
 
   NumFuncArgs = F.arg_size();
 
-  unsigned ICount = 1;
-  // DFSToInstr.emplace_back(nullptr);
-
   RPOT = new ReversePostOrderTraversal<Function *>(&F);
 
-  DenseMap<const DomTreeNode *, unsigned> RPOOrdering;
-  unsigned Counter = 0;
-  for (auto &B : *RPOT) {
-    auto *Node = DT->getNode(B);
-    assert(Node && "RPO and Dominator tree should have same reachability");
-
-    // Assign each block RPO index
-    RPOOrdering[Node] = ++Counter;
-
-    // Collect all the expressions
-    for (auto &I : *B) {
-      // Create ProtoExpresison, this expression will not be versioned and used
-      // to bind Versioned Expressions of the same kind/class.
-      auto PE = CreateExpression(I);
-      // This is the real versioned expression
-      auto VE = CreateExpression(I);
-
-      assert(PE && VE && "Oh No!");
-
-      InstToVExpr.insert({&I, VE});
-      VExprToInst.insert({VE, &I});
-      VExprToPExpr[VE] = PE;
-      if (!PExprToVExprs.count(PE)) {
-        PExprToVExprs.insert({PE, {VE}});
-      } else {
-        PExprToVExprs[PE].insert(VE);
-      }
-
-      // Map Proto-to-Reals and Proto-to-Blocks
-      if (!PExprToInsts.count(PE)) {
-        PExprToInsts.insert({PE, {&I}});
-        PExprToBlocks.insert({PE, {B}});
-      } else {
-        PExprToInsts[PE].insert(&I);
-        PExprToBlocks[PE].insert(B);
-      }
-    }
-  }
-
-  // Sort dominator tree children arrays into RPO.
-  for (auto &B : *RPOT) {
-    auto *Node = DT->getNode(B);
-    if (Node->getChildren().size() > 1) {
-      std::sort(Node->begin(), Node->end(),
-                [&RPOOrdering](const DomTreeNode *A, const DomTreeNode *B) {
-                  return RPOOrdering[A] < RPOOrdering[B];
-                });
-    }
-  }
-
-  // Assign each instruction a DFS order number. This will be the main order
-  // we traverse DT in.
-  auto DFI = df_begin(DT->getRootNode());
-  for (auto DFE = df_end(DT->getRootNode()); DFI != DFE; ++DFI) {
-    BasicBlock *B = DFI->getBlock();
-    const auto &BlockRange = AssignDFSNumbers(B, ICount, &InstrDFS, &DFSToInstr);
-    // BlockInstRange.insert({B, BlockRange});
-    ICount += BlockRange.second - BlockRange.first;
-  }
-
-  // Now we need to create Reverse Sorted Dominator Tree, where siblings sorted
-  // in the opposite to RPO order. This order will give us a clue when during
-  // the normal traversal we go up the tree. For example:
-  //
-  //   CFG:    DT:
-  //
-  //    a       a     RPO(CFG): { a, c, b, d, e } // normal cfg rpo
-  //   / \    / | \   DFS(DT):  { a, b, d, e, c } // before reorder
-  //  b   c  b  d  c  DFS(DT):  { a, c, b, d, e } // after reorder
-  //   \ /      |
-  //    d       e     SDFS(DT): { a, d, e, b, c } // after reverse reorder
-  //    |             SDFSO(DFS(DT),SDFS(DT)): { 1, 5, 4, 2, 3 }
-  //    e                                          <  >  >  <
-  //
-  // So this SDFSO which maps our RPOish DFS(DT) onto SDFS order gives us points
-  // where we must backtrace our context(stack or whatever we keep updated).
-  // These are the places where the next SDFSO is less than the previous one.
-  //
-  for (auto &B : *RPOT) {
-    auto *Node = DT->getNode(B);
-    if (Node->getChildren().size() > 1) {
-      std::sort(Node->begin(), Node->end(),
-                [&RPOOrdering](const DomTreeNode *A, const DomTreeNode *B) {
-                  // NOTE here we are using the reversed operator
-                  return RPOOrdering[A] > RPOOrdering[B];
-                });
-    }
-  }
-
-  // Calculate Instruction-to-SDFS map
-  ICount = 1;
-  DFI = df_begin(DT->getRootNode());
-  for (auto DFE = df_end(DT->getRootNode()); DFI != DFE; ++DFI) {
-    BasicBlock *B = DFI->getBlock();
-    const auto &BlockRange = AssignDFSNumbers(B, ICount, &InstrSDFS, nullptr);
-    // BlockInstRange.insert({B, BlockRange});
-    ICount += BlockRange.second - BlockRange.first;
-  }
-
+  Init();
 
   FactorInsertion();
   DEBUG(PrintDebug("STEP 1"));

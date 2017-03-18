@@ -547,6 +547,8 @@ private:
 
   void PrintDebug(const std::string &Caption);
 
+  void Init();
+
   void FactorInsertion();
 
   void Rename();
