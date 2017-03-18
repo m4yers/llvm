@@ -70,7 +70,7 @@ unsigned Expression::LastID = 0;
 //===----------------------------------------------------------------------===//
 
 // This is used as ⊥ version
-Expression BExpr;
+Expression BExpr(ET_Buttom, ~2U, false);
 
 std::pair<unsigned, unsigned> SSAPRE::
 AssignDFSNumbers(BasicBlock *B, unsigned Start,
@@ -363,18 +363,28 @@ PrintDebug(std::string Caption) {
   for (auto &P : PExprToInsts) {
     dbgs() << "(" << P.getSecond().size() << ") ";
     P.getFirst()->printInternal(dbgs());
+    if (!P.getFirst()->getSave())
+      continue;
     dbgs() << ":";
     for (const auto &I : P.getSecond()) {
-      dbgs() << "\n" << *I;
+      auto &VE = InstToVExpr[I];
+      if (!VE->getSave())
+        dbgs() << "\n(deleted)";
+      else
+        dbgs() << "\n" << *I;
     }
     dbgs() << "\n";
   }
 
   dbgs() << "\nORDERS DFS/SDFS";
-  for (auto &I : DFSToInstr) {
+  for (auto &V : DFSToInstr) {
+    auto I = dyn_cast<Instruction>(V);
     dbgs() << "\n" << InstrDFS[I];
     dbgs() << "\t" << InstrSDFS[I];
-    dbgs() << "\t" << *I;
+    if (KillList.count((Instruction *)I))
+      dbgs() << "\t(deleted)";
+    else
+      dbgs() << "\t" << *I;
   }
 
   dbgs() << "\nBlockToFactors\n";
@@ -570,9 +580,141 @@ FinalizeVisit(BasicBlock &B) {
   }
 }
 
+bool SSAPRE::
+CodeMotion() {
+  bool Changed = false;
+
+  DenseMap<const Expression *, unsigned> PExprToCounter;
+  for (auto &P : PExprToInsts) PExprToCounter.insert({P.getFirst(), 1});
+
+  DenseMap<const Expression *, std::stack<std::pair<unsigned, Expression *>>>
+    PExprToVExprStack;
+
+  for (auto B : *RPOT) {
+    // Since factors live outside basick blocks we set theirs DFS as the first
+    // instruction's in the block
+    auto FSDFS = InstrSDFS[&B->front()];
+
+    for (auto FE : BlockToFactors[B]) {
+      // Set Factor version
+      FE->setVersion(PExprToCounter[&FE->getPExpr()]++);
+
+      // Push VExpr onto stack Expr stack
+      if (!PExprToVExprStack.count(FE)) {
+        PExprToVExprStack.insert({FE, {}});
+      }
+      PExprToVExprStack[FE].push({FSDFS, FE});
+    }
+
+    for (auto &I : *B) {
+      auto &VE = InstToVExpr[&I];
+      auto &PE = VExprToPExpr[VE];
+
+      // For each terminator we need to visit every cfg successor of this block
+      // to update its Factor expressions
+      if (I.isTerminator()) {
+        auto *T = dyn_cast<TerminatorInst>(&I);
+        for (auto S : T->successors()) {
+          for (auto F : BlockToFactors[S]) {
+            auto &VES = PExprToVExprStack[&F->getPExpr()];
+            size_t PI = F->getPredIndex(B);
+            assert(PI != -1UL && "Should not be the case");
+            F->setVExpr(PI, VES.empty() ? &BExpr : VES.top().second);
+          }
+        }
+
+        break;
+      }
+
+      // Do nothing for ignored expressions
+      if (IgnoredExpression::classof(VE) || UnknownExpression::classof(VE))
+        continue;
+
+      auto SDFS = InstrSDFS[&I];
+      auto &VES = PExprToVExprStack[PE];
+
+      // Backtrace every PExprs' stack if we jumped up the tree
+      for (auto &P : PExprToVExprStack) {
+        auto &VES = P.getSecond();
+        while (!VES.empty() && VES.top().first > SDFS) {
+          VES.pop();
+        }
+      }
+
+      if (VE->getSave()) {
+        // Leave it be
+        VES.push({SDFS, VE});
+      } else if (VE->getReload()) {
+        auto *VESTop = VES.empty() ? nullptr : VES.top().second;
+        assert(VESTop && "This must not be null");
+        assert(VESTop->getSave() && "This Value must be saved");
+        auto &RI = VExprToInst[VESTop];
+        I.replaceAllUsesWith(RI);
+        // SHIT ugly af
+        // Update Factors
+        for (auto F : FExprs) {
+          auto VEI = F->getVExprIndex(VE);
+          if (VEI != -1UL) F->setVExpr(VEI, VESTop);
+        }
+        Changed = true;
+      } else {
+        assert(I.hasNUses(0) && "This instructin must not have any uses");
+        KillList.insert(&I);
+        Changed = true;
+      }
+    }
+  }
+
+  dbgs() << "KILL'EM ALL";
+  for (auto I : KillList) {
+    dbgs() << "\nKILL ";
+    I->printAsOperand(dbgs());
+    I->eraseFromParent();
+  }
+
+  // Insert PHIs for each available
+  for (auto &P : BlockToFactors) {
+    auto &B = P.getFirst();
+
+    // Check parameters of potential PHIs, they are either:
+    //  - Factor
+    //  - Saved Expression
+    for (auto F : P.getSecond()) {
+      bool hasFactors = false;
+      bool hasSaved = false;
+      bool hasDeleted = false;
+      for (auto &O : F->getVExprs()) {
+        if (FactorExpression::classof(O)) {
+          hasFactors = true;
+          continue;
+        }
+        hasSaved   |= O->getSave();
+        hasDeleted |= !O->getSave();
+      }
+
+      // Insert a PHI only if its operands are live
+      if (hasFactors || hasSaved) {
+        assert(!hasDeleted && "Must not be the case");
+        IRBuilder<> Builder((Instruction *)B->getTerminator());
+        auto BE = dyn_cast<BasicExpression>(&F->getPExpr());
+        auto PHI = Builder.CreatePHI(BE->getType(), F->getVExprNum());
+        for (unsigned i = 0, l = F->getVExprNum(); i < l; ++i) {
+          auto VES = PExprToVExprStack[&F->getPExpr()];
+          assert(!VES.empty() && "VES must not be empty");
+          auto VESTop = VES.top().second;
+          PHI->setIncomingValue(i, VExprToInst[VESTop]);
+        }
+        Changed = true;
+      }
+    }
+  }
+  return Changed;
+}
+
 PreservedAnalyses SSAPRE::
-runImpl(Function &F, AssumptionCache &_AC,
-                TargetLibraryInfo &_TLI, DominatorTree &_DT) {
+runImpl(Function &F,
+        AssumptionCache &_AC,
+        TargetLibraryInfo &_TLI, DominatorTree &_DT) {
   bool Changed = false;
 
   TLI = &_TLI;
@@ -588,11 +730,11 @@ runImpl(Function &F, AssumptionCache &_AC,
   // This is used during renaming step
   DenseMap<const Expression *, FactorRenamingContext> PExprToRC;
 
-  ReversePostOrderTraversal<Function *> RPOT(&F);
+  RPOT = new ReversePostOrderTraversal<Function *>(&F);
 
   DenseMap<const DomTreeNode *, unsigned> RPOOrdering;
   unsigned Counter = 0;
-  for (auto &B : RPOT) {
+  for (auto &B : *RPOT) {
     auto *Node = DT->getNode(B);
     assert(Node && "RPO and Dominator tree should have same reachability");
 
@@ -634,7 +776,7 @@ runImpl(Function &F, AssumptionCache &_AC,
   }
 
   // Sort dominator tree children arrays into RPO.
-  for (auto &B : RPOT) {
+  for (auto &B : *RPOT) {
     auto *Node = DT->getNode(B);
     if (Node->getChildren().size() > 1) {
       std::sort(Node->begin(), Node->end(),
@@ -672,7 +814,7 @@ runImpl(Function &F, AssumptionCache &_AC,
   // where we must backtrace our context(stack or whatever we keep updated).
   // These are the places where the next SDFSO is less than the previous one.
   //
-  for (auto &B : RPOT) {
+  for (auto &B : *RPOT) {
     auto *Node = DT->getNode(B);
     if (Node->getChildren().size() > 1) {
       std::sort(Node->begin(), Node->end(),
@@ -746,7 +888,7 @@ runImpl(Function &F, AssumptionCache &_AC,
   //   - Factor operands, these generally versioned as Bottom
   DenseMap<const Expression *, std::stack<std::pair<unsigned, Expression *>>>
     PExprToVExprStack;
-  for (auto B : RPOT) {
+  for (auto B : *RPOT) {
     // Since factors live outside basick blocks we set theirs DFS as the first
     // instruction's in the block
     auto FSDFS = InstrSDFS[&B->front()];
@@ -873,11 +1015,16 @@ runImpl(Function &F, AssumptionCache &_AC,
   DEBUG(PrintDebug("STEP 4"));
 
   // STEP 5 Finalize
-  for (auto B : RPOT) {
+  for (auto B : *RPOT) {
     FinalizeVisit(*B);
   }
 
   DEBUG(PrintDebug("STEP 5"));
+
+  // STEP 6 Code Motion
+  Changed = CodeMotion();
+
+  DEBUG(PrintDebug("STEP 6"));
 
   if (!Changed)
     return PreservedAnalyses::all();

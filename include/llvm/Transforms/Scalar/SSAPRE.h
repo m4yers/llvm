@@ -20,6 +20,7 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/Dominators.h"
+#include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/Support/ArrayRecycler.h"
 #include <stack>
 
@@ -36,6 +37,7 @@ class SSAPRELegacy;
 
 enum ExpressionType {
   ET_Base,
+  ET_Buttom,
   ET_Ignored,
   ET_Unknown,
   ET_BasicStart,
@@ -74,8 +76,9 @@ private:
   bool Reload;
 
 public:
-  Expression(ExpressionType ET = ET_Base, unsigned O = ~2U)
-      : ID(LastID++), EType(ET), Opcode(O), Version(-1) {}
+  Expression(ExpressionType ET = ET_Base, unsigned O = ~2U, bool S = true)
+      : ID(LastID++), EType(ET), Opcode(O), Version(-1),
+        Save(S), Reload(false) {}
   // Expression(const Expression &) = delete;
   // Expression &operator=(const Expression &) = delete;
   virtual ~Expression();
@@ -375,8 +378,10 @@ public:
   bool equals(const Expression &Other) const override {
     if (!this->Expression::equals(Other))
       return false;
-    const FactorExpression &OE = cast<FactorExpression>(Other);
-    return &BB == &OE.BB;
+    if (auto OE = dyn_cast<FactorExpression>(&Other)) {
+      return &BB == &OE->BB;
+    }
+    return false;
   }
 
   hash_code getHashValue() const override {
@@ -455,6 +460,7 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
   const TargetLibraryInfo *TLI;
   AssumptionCache *AC;
   DominatorTree *DT;
+  ReversePostOrderTraversal<Function *> *RPOT;
 
   // Number of function arguments, used by ranking
   unsigned int NumFuncArgs;
@@ -473,7 +479,7 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
 
   // Instruction-to-Expression map
   DenseMap<const Instruction *, Expression *> InstToVExpr;
-  DenseMap<Expression *, const Instruction *> VExprToInst;
+  DenseMap<Expression *, Instruction *> VExprToInst;
 
   // ProtoExpression-to-Instructions map
   DenseMap<const Expression *, SmallPtrSet<const Instruction *, 5>> PExprToInsts;
@@ -495,6 +501,8 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
   DenseMap<const Expression *, DenseMap<int, Expression *>> AvailDef;
 
   DenseMap<const BasicBlock *, SmallPtrSet<const Expression *, 5>> BlockToInserts;
+
+  SmallPtrSet<Instruction *, 8> KillList;
 
 public:
   PreservedAnalyses run(Function &F, AnalysisManager<Function> &AM);
@@ -545,6 +553,8 @@ private:
   void WillBeAvail();
 
   void FinalizeVisit(BasicBlock &B);
+
+  bool CodeMotion();
 
   void PrintDebug(std::string Caption);
 
