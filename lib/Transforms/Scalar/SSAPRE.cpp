@@ -485,14 +485,13 @@ Init() {
   // we traverse DT in.
   auto DFI = df_begin(DT->getRootNode());
   for (auto DFE = df_end(DT->getRootNode()); DFI != DFE; ++DFI) {
-    BasicBlock *B = DFI->getBlock();
-    const auto &BlockRange = AssignDFSNumbers(B, ICount, &InstrDFS, &DFSToInstr);
-    // BlockInstRange.insert({B, BlockRange});
+    auto B = DFI->getBlock();
+    auto BlockRange = AssignDFSNumbers(B, ICount, &InstrDFS, &DFSToInstr);
     ICount += BlockRange.second - BlockRange.first;
   }
 
   // Now we need to create Reverse Sorted Dominator Tree, where siblings sorted
-  // in the opposite to RPO order. This order will give us a clue when during
+  // in the opposite to RPO order. This order will give us a clue, when during
   // the normal traversal we go up the tree. For example:
   //
   //   CFG:    DT:
@@ -524,9 +523,8 @@ Init() {
   ICount = 1;
   DFI = df_begin(DT->getRootNode());
   for (auto DFE = df_end(DT->getRootNode()); DFI != DFE; ++DFI) {
-    BasicBlock *B = DFI->getBlock();
-    const auto &BlockRange = AssignDFSNumbers(B, ICount, &InstrSDFS, nullptr);
-    // BlockInstRange.insert({B, BlockRange});
+    auto B = DFI->getBlock();
+    auto BlockRange = AssignDFSNumbers(B, ICount, &InstrSDFS, nullptr);
     ICount += BlockRange.second - BlockRange.first;
   }
 }
@@ -541,6 +539,8 @@ FactorInsertion() {
     if (IgnoreExpression(*PE))
       continue;
 
+    // Each Expression occurrence's DF requires us to insert a Factor function,
+    // which is much like PHI function but for expressions.
     SmallVector<BasicBlock *, 32> IDF;
     ForwardIDFCalculator IDFs(*DT);
     IDFs.setDefiningBlocks(PExprToBlocks[PE]);
@@ -549,17 +549,21 @@ FactorInsertion() {
 
     for (const auto &B : IDF) {
       auto F = CreateFactorExpression(*PE, *B);
-      FExprs.insert(F);
       BlockToFactors[B].insert({F});
+      FExprs.insert(F);
     }
 
+    // TODO
+    // Once operands phi-ud graphs are ready we need to traverse them to insert
+    // Factors at each operands' phi definition.
+    //
+    // NOTE
+    // That this step is before Renaming thus operands of the expression inside
+    // this phi-ud graph won't have actual versions, though they do have
+    // "a version" within LLVM SSA space.
     if (const auto *BE = dyn_cast<const BasicExpression>(PE)) {
       for (auto &O : BE->getOperands()) {
         if (const auto *PHI = dyn_cast<const PHINode>(O)) {
-          // TODO
-          // At this point we do not traverse phi-ud graph for expression's
-          // operands since expressions by itself do not identify a phi-ud graph
-          // as a single variable that changes over time
           auto B = PHI->getParent();
           auto F = CreateFactorExpression(*PE, *B);
           BlockToFactors[B].insert({F});
@@ -581,7 +585,6 @@ Rename() {
   // type(PExpr), after this walk every expression is assign its own version and
   // it becomes a versioned(or instantiated) expression(VExpr).
   DenseMap<const Expression *, int> PExprToCounter;
-  for (auto &P : PExprToInsts) PExprToCounter.insert({P.getFirst(), 0});
 
   // Each PExpr is mapped to a stack of VExpr that grow and shrink during DFS
   // walk. Tops of these stacks are used to name a recent expression occurrence
@@ -602,12 +605,10 @@ Rename() {
     // instruction's in the block
     auto FSDFS = InstrSDFS[&B->front()];
 
+    // Set Factors' versions
     for (auto FE : BlockToFactors[B]) {
-      // Set Factor version
       auto &PE = FE->getPExpr();
       FE->setVersion(PExprToCounter[&PE]++);
-
-      // Push VExpr onto stack Expr stack
       PExprToVExprStack[&PE].push({FSDFS, FE});
     }
 
@@ -630,6 +631,8 @@ Rename() {
         }
       }
 
+      // TODO Any operand definition handling goes here
+
       // TODO
       // This is a simplified version for operand comparison, normally we
       // would check current operands on their respected stacks with operands
@@ -650,10 +653,14 @@ Rename() {
       // VExpr itself will follow it in the traversal, thus, for now, we do not
       // have to assign ⊥ version to the VExpr whenever we see its operand
       // defined.
-      auto *VESTop = VEStack.empty() ? nullptr : VEStack.top().second;
-      if (VESTop && VExprToPExpr[VESTop] == PE) {
+      auto *VEStackTop = VEStack.empty() ? nullptr : VEStack.top().second;
+      if (VEStackTop && VExprToPExpr[VEStackTop] == PE) {
+        // TODO Here we campare VEStackTop used operands' versions against
+        // current operands' versions on their respected stacks, if they match
+        // we use its version, otherwise assign a new one
+
         // If the top of stack contains take its version
-        VE->setVersion(VESTop->getVersion());
+        VE->setVersion(VEStackTop->getVersion());
       } else {
         // Otherwise assign new version
         VE->setVersion(PExprToCounter[PE]++);
@@ -661,8 +668,8 @@ Rename() {
         // STEP 3 Init: DownSafe
         // If the top of the stack contains a Factor expression we clear its
         // DownSafe flag because its result is not used and not anticipated
-        if (VESTop && FactorExpression::classof(VESTop)) {
-          auto *F = dyn_cast<FactorExpression>(VESTop);
+        if (VEStackTop && FactorExpression::classof(VEStackTop)) {
+          auto *F = dyn_cast<FactorExpression>(VEStackTop);
           F->setDownSafe(false);
         }
       }
@@ -678,14 +685,14 @@ Rename() {
         auto &VEStack = PExprToVExprStack[&F->getPExpr()];
         size_t PI = F->getPredIndex(B);
         assert(PI != -1UL && "Should not be the case");
-        auto &VESTop = VEStack.top().second;
-        F->setVExpr(PI, VEStack.empty() ? &BExpr : VESTop);
+        auto &VEStackTop = VEStack.top().second;
+        F->setVExpr(PI, VEStack.empty() ? &BExpr : VEStackTop);
 
         // STEP 3 Init: HasRealUse
         // We set HasRealUse to True for an Factors' operands if they
         // reference a real instruction/expression, and not some another
         // Factor or Factor's operand definition; the last is TBD
-        F->setHasRealUse(PI, BasicExpression::classof(VESTop));
+        F->setHasRealUse(PI, BasicExpression::classof(VEStackTop));
       }
     }
 
@@ -942,16 +949,16 @@ CodeMotion() {
         // Leave it be
         VEStack.push({SDFS, VE});
       } else if (VE->getReload()) {
-        auto *VESTop = VEStack.empty() ? nullptr : VEStack.top().second;
-        assert(VESTop && "This must not be null");
-        assert(VESTop->getSave() && "This Value must be saved");
-        auto &RI = VExprToInst[VESTop];
+        auto *VEStackTop = VEStack.empty() ? nullptr : VEStack.top().second;
+        assert(VEStackTop && "This must not be null");
+        assert(VEStackTop->getSave() && "This Value must be saved");
+        auto &RI = VExprToInst[VEStackTop];
         I.replaceAllUsesWith(RI);
         // SHIT ugly af
         // Update Factors
         for (auto F : FExprs) {
           auto VEI = F->getVExprIndex(VE);
-          if (VEI != -1UL) F->setVExpr(VEI, VESTop);
+          if (VEI != -1UL) F->setVExpr(VEI, VEStackTop);
         }
         Changed = true;
       } else {
@@ -998,8 +1005,8 @@ CodeMotion() {
         for (unsigned i = 0, l = F->getVExprNum(); i < l; ++i) {
           auto VEStack = PExprToVExprStack[&F->getPExpr()];
           assert(!VEStack.empty() && "VEStack must not be empty");
-          auto VESTop = VEStack.top().second;
-          PHI->setIncomingValue(i, VExprToInst[VESTop]);
+          auto VEStackTop = VEStack.top().second;
+          PHI->setIncomingValue(i, VExprToInst[VEStackTop]);
         }
         Changed = true;
       }
