@@ -548,6 +548,10 @@ FactorInsertion() {
     IDFs.calculate(IDF);
 
     for (const auto &B : IDF) {
+      // Exit blocks with no Expression use do not require Factor for it
+      if (B->getTerminator()->getNumSuccessors() == 0 &&
+          PExprToBlocks[PE].count(B) == 0)
+        continue;
       auto F = CreateFactorExpression(*PE, *B);
       BlockToFactors[B].insert({F});
       FExprs.insert(F);
@@ -730,8 +734,11 @@ ResetDownSafety(FactorExpression &FE, unsigned ON) {
 
 void SSAPRE::
 DownSafety() {
+  // Here we propagate DownSafety flag initialized during Step 2 up the Factor
+  // graph for each expression
   for (auto F : FExprs) {
-    if (F->getDownSafe()) continue;
+    if (F->getDownSafe())
+      continue;
     for (size_t i = 0, l = F->getVExprNum(); i < l; ++i) {
       ResetDownSafety(*F, i);
     }
@@ -741,9 +748,7 @@ DownSafety() {
 void SSAPRE::
 ComputeCanBeAvail() {
   for (auto F : FExprs) {
-    if (!F->getDownSafe()
-      && F->getCanBeAvail()
-      && F->getVExprIndex(&BExpr) != -1UL) {
+    if (!F->getDownSafe() && F->getCanBeAvail() && F->hasVExpr(BExpr)) {
       ResetCanBeAvail(*F);
     }
   }
@@ -753,7 +758,7 @@ void SSAPRE::
 ResetCanBeAvail(FactorExpression &G) {
   G.setCanBeAvail(false);
   for (auto F : FExprs) {
-    auto I = F->getVExprIndex(&G);
+    auto I = F->getVExprIndex(G);
     if (I == -1UL) continue;
     if (!F->getHasRealUse(I)) {
       F->setVExpr(I, &BExpr);
@@ -785,9 +790,8 @@ void SSAPRE::
 ResetLater(FactorExpression &G) {
   G.setLater(false);
   for (auto F : FExprs) {
-    auto I = F->getVExprIndex(&G);
-    if (I == -1UL) continue;
-    if (F->getLater()) ResetLater(*F);
+    if (F->hasVExpr(G) && F->getLater())
+      ResetLater(*F);
   }
 }
 
@@ -799,86 +803,93 @@ WillBeAvail() {
 
 void SSAPRE::
 FinalizeVisit(BasicBlock &B) {
+  for (auto &P : PExprToInsts) {
+    AvailDef.insert({P.getFirst(), DenseMap<int,Expression *>()});
+  }
+
   for (auto F : BlockToFactors[&B]) {
     F->setSave(false);
     F->setReload(false);
     auto V = F->getVersion();
     if (F->getWillBeAvail()) {
       auto &PE = F->getPExpr();
-      if (!AvailDef.count(&PE)) {
-          AvailDef.insert({&PE, DenseMap<int,Expression*>()});
-          AvailDef[&PE][V] = F;
-      } else if (!AvailDef[&PE].count(V)) {
-          AvailDef[&PE].insert({V, F});
-      } else {
-        AvailDef[&PE][V] = F;
-      }
+      AvailDef[&PE][V] = F;
     }
   }
 
   for (auto &I : B) {
     auto &VE = InstToVExpr[&I];
     auto &PE = VExprToPExpr[VE];
-    if (I.isTerminator() ||
-        IgnoredExpression::classof(VE) ||
-        UnknownExpression::classof(VE))
+    if (I.isTerminator() || IgnoreExpression(*VE))
       continue;
 
     VE->setSave(false);
     VE->setReload(false);
     auto V = VE->getVersion();
 
-    if (AvailDef.count(PE)) {
-      auto ADE = AvailDef[PE];
-      // FIXME Check whether dominance is not strict
-      if (!ADE.count(V) || DT->dominates(VExprToInst[ADE[V]], VExprToInst[VE])) {
-        ADE[V] = VE;
-      } else if (BasicExpression::classof(ADE[V])) {
-        ADE[V]->setSave(true);
-        VE->setReload(true);
-      }
+    // FIXME Check whether dominance is not strict
+    auto &ADPE = AvailDef[PE];
+    // If there was no expression occurrence before
+    if (!ADPE.count(V) ||
+      // or it was an expression's operand definition
+        ADPE[V] == &BExpr ||
+      // or the previous expression does not dominate the current occurrence
+        !DT->dominates(VExprToInst[ADPE[V]], VExprToInst[VE])) {
+      ADPE[V] = VE;
+      // Or it was a Real occurrence
+    } else if (BasicExpression::classof(ADPE[V])) {
+      ADPE[V]->setSave(true);
+      VE->setReload(true);
     }
+  }
 
-    if (I.isTerminator()) {
-      auto *T = dyn_cast<TerminatorInst>(&I);
-      for (auto S : T->successors()) {
-          for (auto F : BlockToFactors[S]) {
-            if (F->getWillBeAvail()) {
-              auto &PE = F->getPExpr();
-              unsigned PI = F->getPredIndex(&B);
-              auto O = F->getVExpr(PI);
-              // Satisfies insert if either:
-              //   - Version(O) is ⊥
-              //   - HRU(O) is False and O is Factor and WBA(O) is False
-              if (O == &BExpr ||
-                  (!F->getHasRealUse(PI) &&
-                   FactorExpression::classof(O) &&
-                   !dyn_cast<FactorExpression>(O)->getWillBeAvail())) {
-                // Insert the Expression at the of B
-                if (!BlockToInserts.count(&B)) {
-                  BlockToInserts.insert({&B, {&PE}});
-                } else {
-                  BlockToInserts[&B].insert(&PE);
-                }
-              } else {
-                auto OV = O->getVersion();
-                if (AvailDef.count(&PE)) {
-                  auto &ADPE = AvailDef[&PE];
-                  if (BasicExpression::classof(ADPE[OV])) {
-                    ADPE[OV]->setSave(true);
-                  }
-                }
-              }
-            }
+  for (auto S : B.getTerminator()->successors()) {
+    for (auto F : BlockToFactors[S]) {
+      if (F->getWillBeAvail()) {
+        auto &PE = F->getPExpr();
+        auto PI = F->getPredIndex(&B);
+        auto O = F->getVExpr(PI);
+        // Satisfies insert if either:
+        //   - Version(O) is ⊥
+        //   - HRU(O) is False and O is Factor and WBA(O) is False
+        if (O == &BExpr ||
+            (!F->getHasRealUse(PI) &&
+             FactorExpression::classof(O) &&
+             !dyn_cast<FactorExpression>(O)->getWillBeAvail())) {
+          // NOTE
+          // At this point we just create insertion lists, the actual insertion
+          // and rewiring will be done at Code Motion step.
+          if (!BlockToInserts.count(&B)) {
+            BlockToInserts.insert({&B, {&PE}});
+          } else {
+            BlockToInserts[&B].insert(&PE);
           }
+        } else {
+          auto V = O->getVersion();
+          auto &ADPE = AvailDef[&PE];
+          if (BasicExpression::classof(ADPE[V])) {
+            ADPE[V]->setSave(true);
+          }
+        }
       }
-      break;
     }
   }
 }
 
 void SSAPRE::
 Finalize() {
+  // Finalize step performs the following tasks:
+  //   - Decides for each Real expression whether it should be computed on the
+  //     spot or reloaded from the temporary. For each one that is computed, it
+  //     also decides whether the result should be saved to the temp. There are
+  //     two flags that control all that: Save and Reload.
+  //   - For Factors where will_be_avail is true, insertions are performed at
+  //     the incoming edges that correspond to Factor operands at which the
+  //     expression is not available
+  //   - Expression Factors whose will_be_avail predicate is true may become PHI
+  //     for the temp. Factors that are not will_be_avail will not be part of the
+  //     SSA form of the temp, and links from will_be_avail Factors that
+  //     reference them are fixed up to other(real or inserted) expressions.
   for (auto B : *RPOT) {
     FinalizeVisit(*B);
   }
@@ -894,44 +905,30 @@ CodeMotion() {
   DenseMap<const Expression *, std::stack<std::pair<unsigned, Expression *>>>
     PExprToVExprStack;
 
+  for (auto &P : PExprToInsts) {
+    auto &PE = P.getFirst();
+    if (IgnoreExpression(*PE))
+      continue;
+    PExprToCounter.insert({PE, 0});
+    PExprToVExprStack.insert({PE, {}});
+  }
+
   for (auto B : *RPOT) {
-    // Since factors live outside basick blocks we set theirs DFS as the first
+    // Since factors live outside basic blocks we set theirs DFS as the first
     // instruction's in the block
     auto FSDFS = InstrSDFS[&B->front()];
 
     for (auto FE : BlockToFactors[B]) {
-      // Set Factor version
-      FE->setVersion(PExprToCounter[&FE->getPExpr()]++);
-
-      // Push VExpr onto stack Expr stack
-      if (!PExprToVExprStack.count(FE)) {
-        PExprToVExprStack.insert({FE, {}});
-      }
-      PExprToVExprStack[FE].push({FSDFS, FE});
+      auto PE = &FE->getPExpr();
+      FE->setVersion(PExprToCounter[PE]++);
+      PExprToVExprStack[PE].push({FSDFS, FE});
     }
 
     for (auto &I : *B) {
       auto &VE = InstToVExpr[&I];
       auto &PE = VExprToPExpr[VE];
 
-      // For each terminator we need to visit every cfg successor of this block
-      // to update its Factor expressions
-      if (I.isTerminator()) {
-        auto *T = dyn_cast<TerminatorInst>(&I);
-        for (auto S : T->successors()) {
-          for (auto F : BlockToFactors[S]) {
-            auto &VEStack = PExprToVExprStack[&F->getPExpr()];
-            size_t PI = F->getPredIndex(B);
-            assert(PI != -1UL && "Should not be the case");
-            F->setVExpr(PI, VEStack.empty() ? &BExpr : VEStack.top().second);
-          }
-        }
-
-        break;
-      }
-
-      // Do nothing for ignored expressions
-      if (IgnoredExpression::classof(VE) || UnknownExpression::classof(VE))
+      if (IgnoreExpression(*VE))
         continue;
 
       auto SDFS = InstrSDFS[&I];
@@ -952,13 +949,16 @@ CodeMotion() {
         auto *VEStackTop = VEStack.empty() ? nullptr : VEStack.top().second;
         assert(VEStackTop && "This must not be null");
         assert(VEStackTop->getSave() && "This Value must be saved");
+
+        // Replace usage
         auto &RI = VExprToInst[VEStackTop];
         I.replaceAllUsesWith(RI);
-        // SHIT ugly af
+
         // Update Factors
         for (auto F : FExprs) {
-          auto VEI = F->getVExprIndex(VE);
-          if (VEI != -1UL) F->setVExpr(VEI, VEStackTop);
+          auto VEI = F->getVExprIndex(*VE);
+          if (VEI != -1UL)
+            F->setVExpr(VEI, VEStackTop);
         }
         Changed = true;
       } else {
@@ -967,9 +967,20 @@ CodeMotion() {
         Changed = true;
       }
     }
+
+    // For each terminator we need to visit every cfg successor of this block
+    // to update its Factor expressions
+    for (auto S : B->getTerminator()->successors()) {
+      for (auto F : BlockToFactors[S]) {
+        auto &VEStack = PExprToVExprStack[&F->getPExpr()];
+        size_t PI = F->getPredIndex(B);
+        assert(PI != -1UL && "Should not be the case");
+        F->setVExpr(PI, VEStack.empty() ? &BExpr : VEStack.top().second);
+      }
+    }
   }
 
-  dbgs() << "KILL'EM ALL";
+  // Delete marked instructions
   for (auto I : KillList) {
     dbgs() << "\nKILL ";
     I->printAsOperand(dbgs());
@@ -990,10 +1001,10 @@ CodeMotion() {
       for (auto &O : F->getVExprs()) {
         if (FactorExpression::classof(O)) {
           hasFactors = true;
-          continue;
+        } else {
+          hasSaved   |= O->getSave();
+          hasDeleted |= !O->getSave();
         }
-        hasSaved   |= O->getSave();
-        hasDeleted |= !O->getSave();
       }
 
       // Insert a PHI only if its operands are live
@@ -1012,6 +1023,7 @@ CodeMotion() {
       }
     }
   }
+
   return Changed;
 }
 

@@ -348,13 +348,18 @@ public:
   size_t getVExprNum() { return Versions.size(); }
   void setVExpr(unsigned P, Expression * V) { Versions[P] = V; }
   Expression * getVExpr(unsigned P) { return Versions[P]; }
-  size_t getVExprIndex(Expression * V) {
+  size_t getVExprIndex(Expression &V) {
     for(size_t i = 0, l = Versions.size(); i < l; ++i) {
-      if (Versions[i] == V)
+      if (Versions[i] == &V)
         return i;
     }
     return -1;
   }
+
+  bool hasVExpr(Expression &V) {
+    return getVExprIndex(V) != -1UL;
+  }
+
   SmallVector<Expression *, 8> getVExprs() { return Versions; };
 
   bool getDownSafe() const { return DownSafe; }
@@ -479,7 +484,7 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
 
   // Instruction-to-Expression map
   DenseMap<const Instruction *, Expression *> InstToVExpr;
-  DenseMap<Expression *, Instruction *> VExprToInst;
+  DenseMap<const Expression *, Instruction *> VExprToInst;
 
   // ProtoExpression-to-Instructions map
   DenseMap<const Expression *, SmallPtrSet<const Instruction *, 5>> PExprToInsts;
