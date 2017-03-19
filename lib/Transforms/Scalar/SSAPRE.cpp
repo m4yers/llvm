@@ -982,7 +982,7 @@ CodeMotion() {
 
   // Delete marked instructions
   for (auto I : KillList) {
-    dbgs() << "\nKILL ";
+    DEBUG(dbgs() << "\nKILL ");
     I->printAsOperand(dbgs());
     I->eraseFromParent();
   }
