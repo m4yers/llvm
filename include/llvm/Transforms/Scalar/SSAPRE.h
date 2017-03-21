@@ -40,10 +40,10 @@ enum ExpressionType {
   ET_Buttom,
   ET_Ignored,
   ET_Unknown,
+  ET_Factor, // Phi for expressions, Φ in paper
   ET_BasicStart,
   ET_Basic,
   ET_Phi,
-  ET_Factor, // Phi for expressions, Φ in paper
   // TODO later
   // ET_Call,
   // ET_AggregateValue,
@@ -66,30 +66,33 @@ inline std::string ExpressionTypeToString(ExpressionType ET) {
 
 class Expression {
 private:
-  static unsigned LastID;
-  unsigned ID;
   ExpressionType EType;
   unsigned Opcode;
   int Version;
+
+  Instruction *Proto;
 
   bool Save;
   bool Reload;
 
 public:
   Expression(ExpressionType ET = ET_Base, unsigned O = ~2U, bool S = true)
-      : ID(LastID++), EType(ET), Opcode(O), Version(-1),
+      : EType(ET), Opcode(O), Version(-1),
+        Proto(nullptr),
         Save(S), Reload(false) {}
   // Expression(const Expression &) = delete;
   // Expression &operator=(const Expression &) = delete;
   virtual ~Expression();
 
-  unsigned getID() const { return ID; }
   unsigned getOpcode() const { return Opcode; }
   void setOpcode(unsigned opcode) { Opcode = opcode; }
   ExpressionType getExpressionType() const { return EType; }
 
   int getVersion() const { return Version; }
   void setVersion(int V) { Version = V; }
+
+  Instruction * getProto() const { return Proto; }
+  void setProto(Instruction *I) { Proto = I; }
 
   int getSave() const { return Save; }
   void setSave(int S) { Save = S; }
@@ -100,8 +103,8 @@ public:
   static unsigned getEmptyKey() { return ~0U; }
   static unsigned getTombstoneKey() { return ~1U; }
 
-  bool operator==(const Expression &Other) const {
-    if (getOpcode() != Other.getOpcode())
+  bool operator==(const Expression &O) const {
+    if (getOpcode() != O.getOpcode())
       return false;
     if (getOpcode() == getEmptyKey() || getOpcode() == getTombstoneKey())
       return true;
@@ -110,16 +113,23 @@ public:
     // This is needed for load coercion.
     // TODO figure out the reason for this
     // if (getExpressionType() != ET_Load && getExpressionType() != ET_Store &&
-    //     getExpressionType() != Other.getExpressionType())
+    //     getExpressionType() != O.getExpressionType())
     //   return false;
 
-    return equals(Other);
+    return equals(O);
   }
 
-  virtual bool equals(const Expression &Other) const { return true; }
+  virtual bool equals(const Expression &O) const {
+    if (EType == O.EType && Opcode == O.Opcode && Version == O.Version) {
+      assert(Save == O.Save && Reload == O.Reload &&
+          "Expressions are not fully equal");
+      return true;
+    }
+    return false;
+  }
 
   virtual hash_code getHashValue() const {
-    return hash_combine(getExpressionType(), getOpcode());
+    return hash_combine(getExpressionType(), getOpcode(), getVersion());
   }
 
   //
@@ -161,9 +171,10 @@ public:
   Instruction *getInstruction() const { return Inst; }
   void setInstruction(Instruction *I) { Inst = I; }
 
-  bool equals(const Expression &Other) const override {
-    const auto &OU = cast<IgnoredExpression>(Other);
-    return Expression::equals(Other) && Inst == OU.Inst;
+  bool equals(const Expression &O) const override {
+    if (auto OU = dyn_cast<IgnoredExpression>(&O))
+      return Expression::equals(O) && Inst == OU->Inst;
+    return false;
   }
 
   hash_code getHashValue() const override {
@@ -194,8 +205,8 @@ public:
 
 class BasicExpression : public Expression {
 private:
-  typedef ArrayRecycler<Value *> RecyclerType;
-  typedef RecyclerType::Capacity RecyclerCapacity;
+  // typedef ArrayRecycler<Value *> RecyclerType;
+  // typedef RecyclerType::Capacity RecyclerCapacity;
   SmallVector<Value *, 2> Operands;
   Type *ValueType;
 
@@ -205,7 +216,7 @@ public:
   BasicExpression(SmallVector<Value *, 2> O)
       : BasicExpression(O, ET_Basic) {}
   BasicExpression(SmallVector<Value *, 2> O, ExpressionType ET)
-      : Expression(ET), Operands(O) {}
+      : Expression(ET), Operands(O), ValueType(nullptr) {}
   // BasicExpression(const BasicExpression &) = delete;
   // BasicExpression &operator=(const BasicExpression &) = delete;
   ~BasicExpression() override;
@@ -241,12 +252,14 @@ public:
   void setType(Type *T) { ValueType = T; }
   Type *getType() const { return ValueType; }
 
-  bool equals(const Expression &Other) const override {
-    if (getOpcode() != Other.getOpcode())
+  bool equals(const Expression &O) const override {
+    if (!Expression::equals(O))
       return false;
 
-    const auto &OE = cast<BasicExpression>(Other);
-    return getType() == OE.getType() && Operands == OE.Operands;
+    if (auto OE = dyn_cast<BasicExpression>(&O)) {
+      return getType() == OE->getType() && Operands == OE->Operands;
+    }
+    return false;
   }
 
   hash_code getHashValue() const override {
@@ -286,10 +299,10 @@ public:
     return EB->getExpressionType() == ET_Phi;
   }
 
-  bool equals(const Expression &Other) const override {
-    if (!this->BasicExpression::equals(Other))
+  bool equals(const Expression &O) const override {
+    if (!this->BasicExpression::equals(O))
       return false;
-    const PHIExpression &OE = cast<PHIExpression>(Other);
+    const PHIExpression &OE = cast<PHIExpression>(O);
     return BB == OE.BB;
   }
 
@@ -380,10 +393,10 @@ public:
     return EB->getExpressionType() == ET_Factor;
   }
 
-  bool equals(const Expression &Other) const override {
-    if (!this->Expression::equals(Other))
+  bool equals(const Expression &O) const override {
+    if (!this->Expression::equals(O))
       return false;
-    if (auto OE = dyn_cast<FactorExpression>(&Other)) {
+    if (auto OE = dyn_cast<FactorExpression>(&O)) {
       return &BB == &OE->BB;
     }
     return false;
@@ -401,8 +414,7 @@ public:
     this->Expression::printInternal(OS);
     OS << "BB = ";
     BB.printAsOperand(OS, false);
-    OS << ", E = " << PE.getID()
-       << ", V = <";
+    OS << ", V = <";
     for (unsigned i = 0, l = Versions.size(); i < l; ++i) {
       if (Versions[i]) {
         OS << Versions[i]->getVersion();
@@ -435,29 +447,29 @@ public:
 
 using namespace ssapre;
 
-template <> struct DenseMapInfo<const Expression *> {
-  static const Expression *getEmptyKey() {
-    auto Val = static_cast<uintptr_t>(-1);
-    Val <<= PointerLikeTypeTraits<const Expression *>::NumLowBitsAvailable;
-    return reinterpret_cast<const Expression *>(Val);
-  }
-  static const Expression *getTombstoneKey() {
-    auto Val = static_cast<uintptr_t>(~1U);
-    Val <<= PointerLikeTypeTraits<const Expression *>::NumLowBitsAvailable;
-    return reinterpret_cast<const Expression *>(Val);
-  }
-  static unsigned getHashValue(const Expression *V) {
-    return static_cast<unsigned>(V->getHashValue());
-  }
-  static bool isEqual(const Expression *LHS, const Expression *RHS) {
-    if (LHS == RHS)
-      return true;
-    if (LHS == getTombstoneKey() || RHS == getTombstoneKey() ||
-        LHS == getEmptyKey() || RHS == getEmptyKey())
-      return false;
-    return LHS->equals(*RHS);
-  }
-};
+// template <> struct DenseMapInfo<const Expression *> {
+//   static const Expression *getEmptyKey() {
+//     auto Val = static_cast<uintptr_t>(-1);
+//     Val <<= PointerLikeTypeTraits<const Expression *>::NumLowBitsAvailable;
+//     return reinterpret_cast<const Expression *>(Val);
+//   }
+//   static const Expression *getTombstoneKey() {
+//     auto Val = static_cast<uintptr_t>(~1U);
+//     Val <<= PointerLikeTypeTraits<const Expression *>::NumLowBitsAvailable;
+//     return reinterpret_cast<const Expression *>(Val);
+//   }
+//   static unsigned getHashValue(const Expression *V) {
+//     return static_cast<unsigned>(V->getHashValue());
+//   }
+//   static bool isEqual(const Expression *LHS, const Expression *RHS) {
+//     if (LHS == RHS)
+//       return true;
+//     if (LHS == getTombstoneKey() || RHS == getTombstoneKey() ||
+//         LHS == getEmptyKey() || RHS == getEmptyKey())
+//       return false;
+//     return LHS->equals(*RHS);
+//   }
+// };
 
 /// Performs SSA PRE pass.
 class SSAPRE : public PassInfoMixin<SSAPRE> {
@@ -494,19 +506,25 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
 
   // BasicBlock-to-FactorList map
   DenseMap<const BasicBlock *, SmallPtrSet<FactorExpression *, 5>> BlockToFactors;
+  DenseMap<const FactorExpression *, const BasicBlock *> FactorToBlock;
 
   // ProtoExpression-to-VersionedExpressions
   DenseMap<const Expression *, SmallPtrSet<Expression *, 5>> PExprToVExprs;
 
   // VersionedExpression-to-ProtoVersioned
-  DenseMap<Expression *, const Expression *> VExprToPExpr;
+  DenseMap<const Expression *, const Expression *> VExprToPExpr;
 
   SmallPtrSet<FactorExpression *, 32> FExprs;
 
   DenseMap<const Expression *, DenseMap<int, Expression *>> AvailDef;
 
-  DenseMap<const BasicBlock *, SmallPtrSet<const Expression *, 5>> BlockToInserts;
+  DenseMap<const BasicBlock *, SmallPtrSet<Instruction *, 5>> BlockToInserts;
 
+  // This map contains 1-to-1 correspondence between Expression Occurrence and
+  // its Definition. Upon initialization Keys will be equal to Values, once
+  // an Expression assumes existing Version it must define its Definition, so
+  // that during kill time we could replace its use with a proper definition.
+  DenseMap<Expression *, Expression *> Substitutions;
   SmallPtrSet<Instruction *, 8> KillList;
 
 public:
@@ -532,6 +550,8 @@ private:
 
   bool FillInBasicExpressionInfo(Instruction &I, BasicExpression *E);
 
+  bool Dominates(const Expression *Def, const Expression *Use);
+
   // Take a Value returned by simplification of Expression E/Instruction
   // I, and see if it resulted in a simpler expression. If so, return
   // that expression.
@@ -553,6 +573,7 @@ private:
   void PrintDebug(const std::string &Caption);
 
   void Init();
+  void Fini();
 
   void FactorInsertion();
 

@@ -61,7 +61,6 @@ UnknownExpression::~UnknownExpression() = default;
 BasicExpression::~BasicExpression() = default;
 PHIExpression::~PHIExpression() = default;
 FactorExpression::~FactorExpression() = default;
-unsigned Expression::LastID = 0;
 }
 }
 
@@ -138,6 +137,23 @@ FillInBasicExpressionInfo(Instruction &I, BasicExpression *E) {
   return AllConstant;
 }
 
+bool SSAPRE::
+Dominates(const Expression *Def, const Expression *Use) {
+  assert (Def && Use && "Def or Use is null");
+  // If the expression is a Factor we need to use the first non-phi instruction
+  // of the block it belongs to
+  auto IDef = FactorExpression::classof(Def)
+                ? FactorToBlock[(FactorExpression *)Def]->getFirstNonPHI()
+                : VExprToInst[Def];
+
+  auto IUse = FactorExpression::classof(Use)
+                ? FactorToBlock[(FactorExpression *)Use]->getFirstNonPHI()
+                : VExprToInst[Use];
+
+  assert (IDef && IUse && "IDef or IUse is null");
+  return DT->dominates(IDef, IUse);
+}
+
 Expression *SSAPRE::
 CheckSimplificationResults(Expression *E, Instruction &I, Value *V) {
   if (!V)
@@ -178,7 +194,6 @@ CreateUnknownExpression(Instruction &I) {
   E->setOpcode(I.getOpcode());
   return E;
 }
-
 
 Expression * SSAPRE::
 CreateBasicExpression(Instruction &I) {
@@ -367,21 +382,19 @@ IgnoreExpression(const Expression &E) {
 
 void SSAPRE::
 PrintDebug(const std::string &Caption) {
-  dbgs() << "\n" << Caption << ":";
+  dbgs() << "\n" << Caption;
   dbgs() << "--------------------------------------";
   dbgs() << "\nExpressionsToInts\n";
   for (auto &P : PExprToInsts) {
     dbgs() << "(" << P.getSecond().size() << ") ";
-    P.getFirst()->printInternal(dbgs());
-    if (!P.getFirst()->getSave())
-      continue;
-    dbgs() << ":";
-    for (const auto &I : P.getSecond()) {
-      auto &VE = InstToVExpr[I];
-      if (!VE->getSave())
-        dbgs() << "\n(deleted)";
+    auto &PE = P.getFirst();
+    PE->printInternal(dbgs());
+    for (auto VE : PExprToVExprs[PE]) {
+      dbgs() << "\n\t";
+      if (VE->getSave() || VE->getReload())
+        VE->printInternal(dbgs());
       else
-        dbgs() << "\n" << *I;
+        dbgs() << "(deleted)";
     }
     dbgs() << "\n";
   }
@@ -410,16 +423,17 @@ PrintDebug(const std::string &Caption) {
   }
 
   dbgs() << "\nBlockToInserts\n";
-    for (auto &P : BlockToInserts) {
-      dbgs() << "(" << P.getSecond().size() << ") ";
-      P.getFirst()->printAsOperand(dbgs(), false);
-      dbgs() << ":";
-      for (const auto &F : P.getSecond()) {
-        dbgs() << "\n";
-        F->printInternal(dbgs());
-      }
+  for (auto &P : BlockToInserts) {
+    dbgs() << "(" << P.getSecond().size() << ") ";
+    P.getFirst()->printAsOperand(dbgs(), false);
+    dbgs() << ":";
+    for (const auto &I : P.getSecond()) {
+      auto VE = InstToVExpr[I];
       dbgs() << "\n";
+      VE->printInternal(dbgs());
     }
+    dbgs() << "\n";
+  }
 
   dbgs() << "---------------------------------------------\n";
 }
@@ -442,16 +456,25 @@ Init() {
     for (auto &I : *B) {
       // Create ProtoExpresison, this expression will not be versioned and used
       // to bind Versioned Expressions of the same kind/class.
-      auto PE = CreateExpression(I);
+      Expression *PE = CreateExpression(I);
+      for (auto &P : PExprToInsts) {
+        auto EP = P.getFirst();
+        if (PE->equals(*EP))
+          PE = (Expression *)EP;
+      }
+      if (!PE->getProto() && !IgnoreExpression(*PE)) {
+        PE->setProto(I.clone());
+      }
       // This is the real versioned expression
-      auto VE = CreateExpression(I);
+      Expression *VE = CreateExpression(I);
 
       assert(PE && VE && "Oh No!");
 
       BlockToFactors.insert({B, {}});
-      InstToVExpr.insert({&I, VE});
-      VExprToInst.insert({VE, &I});
+      InstToVExpr[&I] = VE;
+      VExprToInst[VE] = &I;
       VExprToPExpr[VE] = PE;
+      Substitutions[VE] = VE;
 
       if (!PExprToVExprs.count(PE)) {
         PExprToVExprs.insert({PE, {VE}});
@@ -530,6 +553,15 @@ Init() {
 }
 
 void SSAPRE::
+Fini() {
+  for (auto &P : PExprToInsts) {
+    auto *Proto = P.getFirst()->getProto();
+    if (Proto)
+      Proto->dropAllReferences();
+  }
+}
+
+void SSAPRE::
 FactorInsertion() {
   // Factors are inserted in two cases:
   //   - for each block in expressions IDF
@@ -552,8 +584,11 @@ FactorInsertion() {
       if (B->getTerminator()->getNumSuccessors() == 0 &&
           PExprToBlocks[PE].count(B) == 0)
         continue;
+      dbgs() << "\nPE " << (void *)PE;
       auto F = CreateFactorExpression(*PE, *B);
       BlockToFactors[B].insert({F});
+      FactorToBlock[F] = B;
+      Substitutions[F] = F;
       FExprs.insert(F);
     }
 
@@ -619,13 +654,7 @@ Rename() {
     for (auto &I : *B) {
       auto &VE = InstToVExpr[&I];
       auto &PE = VExprToPExpr[VE];
-
-      // Do nothing for ignored expressions
-      if (IgnoreExpression(*VE))
-        continue;
-
       auto SDFS = InstrSDFS[&I];
-      auto &VEStack = PExprToVExprStack[PE];
 
       // Backtrace every PExprs' stack if we jumped up the tree
       for (auto &P : PExprToVExprStack) {
@@ -634,6 +663,10 @@ Rename() {
           VEStack.pop();
         }
       }
+
+      // Do nothing for ignored expressions
+      if (IgnoreExpression(*VE))
+        continue;
 
       // TODO Any operand definition handling goes here
 
@@ -657,14 +690,22 @@ Rename() {
       // VExpr itself will follow it in the traversal, thus, for now, we do not
       // have to assign ⊥ version to the VExpr whenever we see its operand
       // defined.
+      auto &VEStack = PExprToVExprStack[PE];
       auto *VEStackTop = VEStack.empty() ? nullptr : VEStack.top().second;
-      if (VEStackTop && VExprToPExpr[VEStackTop] == PE) {
+      auto *VEStackTopF = VEStackTop
+                            ? dyn_cast<FactorExpression>(VEStackTop)
+                            : nullptr;
+      if (VEStackTop && (VExprToPExpr[VEStackTop] == PE ||
+            (VEStackTopF && &VEStackTopF->getPExpr() == PE))) {
         // TODO Here we campare VEStackTop used operands' versions against
         // current operands' versions on their respected stacks, if they match
         // we use its version, otherwise assign a new one
 
         // If the top of stack contains take its version
         VE->setVersion(VEStackTop->getVersion());
+        // Set top of the stack as a defining occurrance for the current
+        // Expression
+        Substitutions[VE] = VEStackTop;
       } else {
         // Otherwise assign new version
         VE->setVersion(PExprToCounter[PE]++);
@@ -689,14 +730,14 @@ Rename() {
         auto &VEStack = PExprToVExprStack[&F->getPExpr()];
         size_t PI = F->getPredIndex(B);
         assert(PI != -1UL && "Should not be the case");
-        auto &VEStackTop = VEStack.top().second;
+        auto VEStackTop = VEStack.empty() ? nullptr : VEStack.top().second;
         F->setVExpr(PI, VEStack.empty() ? &BExpr : VEStackTop);
 
         // STEP 3 Init: HasRealUse
         // We set HasRealUse to True for an Factors' operands if they
         // reference a real instruction/expression, and not some another
         // Factor or Factor's operand definition; the last is TBD
-        F->setHasRealUse(PI, BasicExpression::classof(VEStackTop));
+        F->setHasRealUse(PI, VEStackTop && BasicExpression::classof(VEStackTop));
       }
     }
 
@@ -830,11 +871,9 @@ FinalizeVisit(BasicBlock &B) {
     // FIXME Check whether dominance is not strict
     auto &ADPE = AvailDef[PE];
     // If there was no expression occurrence before
-    if (!ADPE.count(V) ||
-      // or it was an expression's operand definition
-        ADPE[V] == &BExpr ||
-      // or the previous expression does not dominate the current occurrence
-        !DT->dominates(VExprToInst[ADPE[V]], VExprToInst[VE])) {
+    // or it was an expression's operand definition
+    // or the previous expression does not dominate the current occurrence
+    if (!ADPE.count(V) || ADPE[V] == &BExpr || !Dominates(ADPE[V], VE)) {
       ADPE[V] = VE;
       // Or it was a Real occurrence
     } else if (BasicExpression::classof(ADPE[V])) {
@@ -857,12 +896,22 @@ FinalizeVisit(BasicBlock &B) {
              FactorExpression::classof(O) &&
              !dyn_cast<FactorExpression>(O)->getWillBeAvail())) {
           // NOTE
-          // At this point we just create insertion lists, the actual insertion
-          // and rewiring will be done at Code Motion step.
+          // At this point we just create insertion lists, update F graph,
+          // the actual insertion and rewiring will be done at Code Motion step.
+          auto I = PE.getProto()->clone();
+          auto VE = CreateExpression(*I);
+          PExprToInsts[&PE].insert(I);
+          VExprToInst[VE] = I;
+          VExprToPExpr[VE] = &PE;
+          InstToVExpr[I] = VE;
+          InstrSDFS[I] = InstrSDFS[B.getTerminator()];
+          InstrDFS[I] = InstrDFS[B.getTerminator()];
+          F->setVExpr(PI, VE);
+          F->setHasRealUse(PI, true);
           if (!BlockToInserts.count(&B)) {
-            BlockToInserts.insert({&B, {&PE}});
+            BlockToInserts.insert({&B, {I}});
           } else {
-            BlockToInserts[&B].insert(&PE);
+            BlockToInserts[&B].insert(I);
           }
         } else {
           auto V = O->getVersion();
@@ -924,6 +973,13 @@ CodeMotion() {
       PExprToVExprStack[PE].push({FSDFS, FE});
     }
 
+    // Insert Instructions
+    for (auto I : BlockToInserts[B]) {
+      IRBuilder<> Builder((Instruction *)B->getTerminator());
+      Builder.Insert(I);
+      Changed = true;
+    }
+
     for (auto &I : *B) {
       auto &VE = InstToVExpr[&I];
       auto &PE = VExprToPExpr[VE];
@@ -951,8 +1007,10 @@ CodeMotion() {
         assert(VEStackTop->getSave() && "This Value must be saved");
 
         // Replace usage
-        auto &RI = VExprToInst[VEStackTop];
-        I.replaceAllUsesWith(RI);
+        Substitutions[VE] = VEStackTop;
+        KillList.insert(&I);
+        // auto &RI = VExprToInst[VEStackTop];
+        // I.replaceAllUsesWith(RI);
 
         // Update Factors
         for (auto F : FExprs) {
@@ -962,7 +1020,7 @@ CodeMotion() {
         }
         Changed = true;
       } else {
-        assert(I.hasNUses(0) && "This instructin must not have any uses");
+        // assert(I.hasNUses(0) && "This instructin must not have any uses");
         KillList.insert(&I);
         Changed = true;
       }
@@ -978,13 +1036,6 @@ CodeMotion() {
         F->setVExpr(PI, VEStack.empty() ? &BExpr : VEStack.top().second);
       }
     }
-  }
-
-  // Delete marked instructions
-  for (auto I : KillList) {
-    DEBUG(dbgs() << "\nKILL ");
-    I->printAsOperand(dbgs());
-    I->eraseFromParent();
   }
 
   // Insert PHIs for each available
@@ -1010,18 +1061,34 @@ CodeMotion() {
       // Insert a PHI only if its operands are live
       if (hasFactors || hasSaved) {
         assert(!hasDeleted && "Must not be the case");
-        IRBuilder<> Builder((Instruction *)B->getTerminator());
+        IRBuilder<> Builder((Instruction *)B->getFirstNonPHI());
         auto BE = dyn_cast<BasicExpression>(&F->getPExpr());
         auto PHI = Builder.CreatePHI(BE->getType(), F->getVExprNum());
-        for (unsigned i = 0, l = F->getVExprNum(); i < l; ++i) {
-          auto VEStack = PExprToVExprStack[&F->getPExpr()];
-          assert(!VEStack.empty() && "VEStack must not be empty");
-          auto VEStackTop = VEStack.top().second;
-          PHI->setIncomingValue(i, VExprToInst[VEStackTop]);
+        for (auto &VE : F->getVExprs()) {
+          auto I = VExprToInst[VE];
+          PHI->addIncoming(I, I->getParent());
         }
+        // Make Factor Expression point to a real PHI
+        VExprToInst[F] = PHI;
         Changed = true;
       }
     }
+  }
+
+  // Delete marked instructions
+  for (auto I : KillList) {
+    DEBUG(dbgs() << "\nKILL ");
+    I->printAsOperand(dbgs());
+    // If there are any uses of this Definition, replace them with an appropriate
+    // version
+    if (I->hasNUsesOrMore(1)) {
+      auto *Def = Substitutions[InstToVExpr[I]];
+      while (Def != Substitutions[Def])
+        Def = Substitutions[Def];
+      I->replaceAllUsesWith(VExprToInst[Def]);
+    }
+    I->dropAllReferences();
+    I->eraseFromParent();
   }
 
   return Changed;
@@ -1045,22 +1112,24 @@ runImpl(Function &F,
   Init();
 
   FactorInsertion();
-  DEBUG(PrintDebug("STEP 1"));
+  DEBUG(PrintDebug("STEP 1: F-Insertion"));
 
   Rename();
-  DEBUG(PrintDebug("STEP 2"));
+  DEBUG(PrintDebug("STEP 2: Renaming"));
 
   DownSafety();
-  DEBUG(PrintDebug("STEP 3"));
+  DEBUG(PrintDebug("STEP 3: DownSafety"));
 
   WillBeAvail();
-  DEBUG(PrintDebug("STEP 4"));
+  DEBUG(PrintDebug("STEP 4: WillBeAvail"));
 
   Finalize();
-  DEBUG(PrintDebug("STEP 5"));
+  DEBUG(PrintDebug("STEP 5: Finalize"));
 
   Changed = CodeMotion();
-  DEBUG(PrintDebug("STEP 6"));
+  DEBUG(PrintDebug("STEP 6: CodeMotion"));
+
+  Fini();
 
   if (!Changed)
     return PreservedAnalyses::all();
