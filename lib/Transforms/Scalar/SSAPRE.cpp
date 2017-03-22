@@ -552,6 +552,7 @@ Init() {
   }
 }
 
+// FIXME Do proper memory management
 void SSAPRE::
 Fini() {
   for (auto &P : PExprToInsts) {
@@ -559,6 +560,23 @@ Fini() {
     if (Proto)
       Proto->dropAllReferences();
   }
+
+  InstrDFS.clear();
+  InstrSDFS.clear();
+  DFSToInstr.clear();
+  InstToVExpr.clear();
+  VExprToInst.clear();
+  PExprToInsts.clear();
+  PExprToBlocks.clear();
+  BlockToFactors.clear();
+  FactorToBlock.clear();
+  PExprToVExprs.clear();
+  VExprToPExpr.clear();
+  FExprs.clear();
+  AvailDef.clear();
+  BlockToInserts.clear();
+  Substitutions.clear();
+  KillList.clear();
 }
 
 void SSAPRE::
@@ -584,7 +602,6 @@ FactorInsertion() {
       if (B->getTerminator()->getNumSuccessors() == 0 &&
           PExprToBlocks[PE].count(B) == 0)
         continue;
-      dbgs() << "\nPE " << (void *)PE;
       auto F = CreateFactorExpression(*PE, *B);
       BlockToFactors[B].insert({F});
       FactorToBlock[F] = B;
@@ -748,6 +765,8 @@ Rename() {
     if (T->getNumSuccessors() == 0) {
       for (auto &P : PExprToVExprStack) {
         auto &VEStack = P.getSecond();
+        if (VEStack.empty())
+          continue;
         if (auto *F = dyn_cast<FactorExpression>(VEStack.top().second)) {
           F->setDownSafe(false);
         }
@@ -1077,7 +1096,6 @@ CodeMotion() {
 
   // Delete marked instructions
   for (auto I : KillList) {
-    DEBUG(dbgs() << "\nKILL ");
     I->printAsOperand(dbgs());
     // If there are any uses of this Definition, replace them with an appropriate
     // version
@@ -1098,6 +1116,8 @@ PreservedAnalyses SSAPRE::
 runImpl(Function &F,
         AssumptionCache &_AC,
         TargetLibraryInfo &_TLI, DominatorTree &_DT) {
+  DEBUG(dbgs() << "SSAPRE(" << this << ") running on " << F.getName());
+
   bool Changed = false;
 
   TLI = &_TLI;
