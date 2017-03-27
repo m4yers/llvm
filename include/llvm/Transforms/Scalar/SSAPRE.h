@@ -40,6 +40,8 @@ enum ExpressionType {
   ET_Buttom,
   ET_Ignored,
   ET_Unknown,
+  ET_Constant,
+  ET_Variable,
   ET_Factor, // Phi for expressions, Φ in paper
   ET_BasicStart,
   ET_Basic,
@@ -128,13 +130,6 @@ public:
     return false;
   }
 
-  virtual hash_code getHashValue() const {
-    return hash_combine(getExpressionType(), getOpcode(), getVersion());
-  }
-
-  //
-  // Debugging support
-  //
   virtual void printInternal(raw_ostream &OS) const {
     OS << ExpressionTypeToString(getExpressionType());
     OS << ", V: " << Version;
@@ -177,13 +172,6 @@ public:
     return false;
   }
 
-  hash_code getHashValue() const override {
-    return hash_combine(getExpressionType(), Inst);
-  }
-
-  //
-  // Debugging support
-  //
   void printInternal(raw_ostream &OS) const override {
     this->Expression::printInternal(OS);
     OS << "I = " << *Inst;
@@ -203,6 +191,57 @@ public:
   }
 };
 
+class VariableExpression final : public Expression {
+private:
+  Value &VariableValue;
+
+public:
+  VariableExpression(Value &V) : Expression(ET_Variable), VariableValue(V) {}
+  VariableExpression() = delete;
+  VariableExpression(const VariableExpression &) = delete;
+  VariableExpression &operator=(const VariableExpression &) = delete;
+
+  static bool classof(const Expression *EB) {
+    return EB->getExpressionType() == ET_Variable;
+  }
+
+  bool equals(const Expression &Other) const override {
+    const VariableExpression &OC = cast<VariableExpression>(Other);
+    return &VariableValue == &OC.VariableValue;
+  }
+
+  void printInternal(raw_ostream &OS) const override {
+    this->Expression::printInternal(OS);
+    OS << "A: " << VariableValue;
+  }
+};
+
+class ConstantExpression final : public Expression {
+private:
+  Constant &ConstantValue;
+
+public:
+  ConstantExpression(Constant &C)
+      : Expression(ET_Constant), ConstantValue(C) {}
+  ConstantExpression() = delete;
+  ConstantExpression(const ConstantExpression &) = delete;
+  ConstantExpression &operator=(const ConstantExpression &) = delete;
+
+  static bool classof(const Expression *EB) {
+    return EB->getExpressionType() == ET_Constant;
+  }
+
+  bool equals(const Expression &Other) const override {
+    const ConstantExpression &OC = cast<ConstantExpression>(Other);
+    return &ConstantValue == &OC.ConstantValue;
+  }
+
+  void printInternal(raw_ostream &OS) const override {
+    this->Expression::printInternal(OS);
+    OS << "C:" << ConstantValue;
+  }
+};
+
 class BasicExpression : public Expression {
 private:
   // typedef ArrayRecycler<Value *> RecyclerType;
@@ -211,14 +250,10 @@ private:
   Type *ValueType;
 
 public:
-  BasicExpression()
-      : BasicExpression({}, ET_Basic) {}
-  BasicExpression(SmallVector<Value *, 2> O)
-      : BasicExpression(O, ET_Basic) {}
-  BasicExpression(SmallVector<Value *, 2> O, ExpressionType ET)
-      : Expression(ET), Operands(O), ValueType(nullptr) {}
-  // BasicExpression(const BasicExpression &) = delete;
-  // BasicExpression &operator=(const BasicExpression &) = delete;
+  BasicExpression(ExpressionType ET = ET_Basic)
+      : Expression(ET), ValueType(nullptr) {}
+  BasicExpression(const BasicExpression &) = delete;
+  BasicExpression &operator=(const BasicExpression &) = delete;
   ~BasicExpression() override;
 
   static bool classof(const Expression *EB) {
@@ -226,25 +261,21 @@ public:
     return ET > ET_BasicStart && ET < ET_BasicEnd;
   }
 
-  void swapOperands(unsigned First, unsigned Second) {
-    std::swap(Operands[First], Operands[Second]);
-  }
-
-  Value *getOperand(unsigned N) const {
-    return Operands[N];
-  }
-
-  const SmallVector<Value *, 2>& getOperands() const {
-    return Operands;
-  }
-
   void addOperand(Value *V) {
     Operands.push_back(V);
   }
-
+  Value *getOperand(unsigned N) const {
+    return Operands[N];
+  }
   void setOperand(unsigned N, Value *V) {
     assert(N < Operands.size() && "Operand out of range");
     Operands[N] = V;
+  }
+  void swapOperands(unsigned First, unsigned Second) {
+    std::swap(Operands[First], Operands[Second]);
+  }
+  const SmallVector<Value *, 2>& getOperands() const {
+    return Operands;
   }
 
   unsigned getNumOperands() const { return Operands.size(); }
@@ -262,14 +293,6 @@ public:
     return false;
   }
 
-  hash_code getHashValue() const override {
-    return hash_combine(getExpressionType(), getOpcode(), ValueType,
-        hash_combine_range(Operands.begin(), Operands.end()));
-  }
-
-  //
-  // Debugging support
-  //
   void printInternal(raw_ostream &OS) const override {
     this->Expression::printInternal(OS);
     OS << "OPS: { ";
@@ -285,15 +308,28 @@ public:
 
 class PHIExpression final : public BasicExpression {
 private:
+  Expression *PE; // common PE of the expressions it functions on
   BasicBlock *BB;
 
 public:
-  PHIExpression(SmallVector<Value *, 2> O, BasicBlock *BB)
-      : BasicExpression(O, ET_Phi), BB(BB) {}
-  PHIExpression() = default;
-  // PHIExpression(const PHIExpression &) = delete;
-  // PHIExpression &operator=(const PHIExpression &) = delete;
+  PHIExpression(BasicBlock *BB)
+    : BasicExpression(ET_Phi), PE(PHIExpression::getPExprNotSet()), BB(BB) {}
+  PHIExpression() = delete;
+  PHIExpression(const PHIExpression &) = delete;
+  PHIExpression &operator=(const PHIExpression &) = delete;
   ~PHIExpression() override;
+
+  bool isCommonPExprSet() const {
+    return PE != PHIExpression::getPExprNotSet();
+  }
+  bool hasCommonPExpr() const {
+    return isCommonPExprSet() && PE != PHIExpression::getPExprMismatch();
+  }
+  void setCommonPExpr(Expression *E) { assert(E); PE = E; }
+  Expression * getCommonPExpr() const { return PE; }
+
+  static Expression * getPExprNotSet()   { return (Expression *)~0; }
+  static Expression * getPExprMismatch() { return (Expression *)~1; }
 
   static bool classof(const Expression *EB) {
     return EB->getExpressionType() == ET_Phi;
@@ -302,20 +338,16 @@ public:
   bool equals(const Expression &O) const override {
     if (!this->BasicExpression::equals(O))
       return false;
-    const PHIExpression &OE = cast<PHIExpression>(O);
-    return BB == OE.BB;
+    if (auto OE = dyn_cast<PHIExpression>(&O)) {
+      return BB == OE->BB;
+    }
+    return false;
   }
 
-  hash_code getHashValue() const override {
-    return hash_combine(this->BasicExpression::getHashValue(), BB);
-  }
-
-  //
-  // Debugging support
-  //
   void printInternal(raw_ostream &OS) const override {
     this->BasicExpression::printInternal(OS);
-    OS << "BB = " << BB->getValueName();
+    OS << "BB: ";
+    BB->printAsOperand(dbgs());
   }
 }; // class PHIExpression
 
@@ -323,6 +355,7 @@ class FactorExpression final : public Expression {
 private:
   const Expression &PE;
   const BasicBlock &BB;
+  const PHIExpression *PHI;
   SmallVector<const BasicBlock *, 8> Pred;
   SmallVector<Expression *, 8> Versions;
 
@@ -338,7 +371,7 @@ private:
 public:
   FactorExpression(const Expression &PE, const BasicBlock &BB,
                    SmallVector<const BasicBlock *, 8> P)
-      : Expression(ET_Factor), PE(PE), BB(BB), Pred(P),
+      : Expression(ET_Factor), PE(PE), BB(BB), PHI(nullptr), Pred(P),
                    Versions(P.size(), nullptr),
                    DownSafe(true), HasRealUse(P.size(), false),
                    CanBeAvail(true), Later(true) { }
@@ -346,6 +379,9 @@ public:
   FactorExpression(const FactorExpression &) = delete;
   FactorExpression &operator=(const FactorExpression &) = delete;
   ~FactorExpression() override;
+
+  void setLinkedPHI(const PHIExpression *P) { PHI = P; }
+  const PHIExpression * getLinkedPHI() const { return PHI; }
 
   const Expression& getPExpr() const { return PE; }
 
@@ -402,19 +438,12 @@ public:
     return false;
   }
 
-  hash_code getHashValue() const override {
-    return hash_combine(this->Expression::getHashValue(), &PE, &BB,
-        hash_combine_range(Versions.begin(), Versions.end()));
-  }
-
-  //
-  // Debugging support
-  //
   void printInternal(raw_ostream &OS) const override {
     this->Expression::printInternal(OS);
-    OS << "BB = ";
+    OS << "BB: ";
     BB.printAsOperand(OS, false);
-    OS << ", V = <";
+    OS << ", LNK: " << (PHI ? "T" : "F");
+    OS << ", V: <";
     for (unsigned i = 0, l = Versions.size(); i < l; ++i) {
       if (Versions[i]) {
         OS << Versions[i]->getVersion();
@@ -447,30 +476,6 @@ public:
 
 using namespace ssapre;
 
-// template <> struct DenseMapInfo<const Expression *> {
-//   static const Expression *getEmptyKey() {
-//     auto Val = static_cast<uintptr_t>(-1);
-//     Val <<= PointerLikeTypeTraits<const Expression *>::NumLowBitsAvailable;
-//     return reinterpret_cast<const Expression *>(Val);
-//   }
-//   static const Expression *getTombstoneKey() {
-//     auto Val = static_cast<uintptr_t>(~1U);
-//     Val <<= PointerLikeTypeTraits<const Expression *>::NumLowBitsAvailable;
-//     return reinterpret_cast<const Expression *>(Val);
-//   }
-//   static unsigned getHashValue(const Expression *V) {
-//     return static_cast<unsigned>(V->getHashValue());
-//   }
-//   static bool isEqual(const Expression *LHS, const Expression *RHS) {
-//     if (LHS == RHS)
-//       return true;
-//     if (LHS == getTombstoneKey() || RHS == getTombstoneKey() ||
-//         LHS == getEmptyKey() || RHS == getEmptyKey())
-//       return false;
-//     return LHS->equals(*RHS);
-//   }
-// };
-
 /// Performs SSA PRE pass.
 class SSAPRE : public PassInfoMixin<SSAPRE> {
   const DataLayout *DL;
@@ -479,8 +484,20 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
   DominatorTree *DT;
   ReversePostOrderTraversal<Function *> *RPOT;
 
-  // Number of function arguments, used by ranking
+  SmallPtrSet<const BasicBlock *, 32> JoinBlocks;
+
+  // Values' stuff
+  DenseMap<Expression *, const Value *> ExpToValue;
+  DenseMap<const Value *, Expression *> ValueToExp;
+
+  // Arguments' stuff
   unsigned int NumFuncArgs;
+  DenseMap<VariableExpression *, Value *> VAExpToValue;
+  DenseMap<const Value *, VariableExpression *> ValueToVAExp;
+
+  // Constants' stuff
+  DenseMap<ConstantExpression *, Value *> COExpToValue;
+  DenseMap<const Value *, ConstantExpression *> ValueToCOExp;
 
   // DFS info.
   // This contains a mapping from Instructions to DFS numbers.
@@ -507,6 +524,10 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
   // BasicBlock-to-FactorList map
   DenseMap<const BasicBlock *, SmallPtrSet<FactorExpression *, 5>> BlockToFactors;
   DenseMap<const FactorExpression *, const BasicBlock *> FactorToBlock;
+
+  // Map PHI to Factor if PHI joins two expressions of the same proto
+  DenseMap<FactorExpression *, PHIExpression *> FExprToPHIExpr;
+  DenseMap<PHIExpression *, FactorExpression *> PHIExprToFExpr;
 
   // ProtoExpression-to-VersionedExpressions
   DenseMap<const Expression *, SmallPtrSet<Expression *, 5>> PExprToVExprs;
@@ -560,19 +581,26 @@ private:
   Expression * CheckSimplificationResults(Expression *E,
                                           Instruction &I,
                                           Value *V);
+  ConstantExpression * CreateConstantExpression(Constant &C);
+  VariableExpression * CreateVariableExpression(Value &V);
   Expression * CreateIgnoredExpression(Instruction &I);
   Expression * CreateUnknownExpression(Instruction &I);
   Expression * CreateBasicExpression(Instruction &I);
-  Expression * CreatePHIExpression(Instruction &I);
+  Expression * CreatePHIExpression(PHINode &I);
   FactorExpression * CreateFactorExpression(const Expression &E,
                                             const BasicBlock &B);
   Expression * CreateExpression(Instruction &I);
 
   bool IgnoreExpression(const Expression &E);
 
+  // It is possible that a "materialized" Factor already exists in the code
+  // if form of a PHI expression that joins two expressions of the same proto and
+  // we need to account for that.
+  void SetCommonProto(PHIExpression &PHI);
+
   void PrintDebug(const std::string &Caption);
 
-  void Init();
+  void Init(Function &F);
   void Fini();
 
   void FactorInsertion();

@@ -1,4 +1,4 @@
-//===---- SSAPRELegacy.cpp - SSA PARTIAL REDUNDANCY ELIMINATION--------*- C++ -*-===//
+//===---- SSAPRELegacy.cpp - SSA PARTIAL REDUNDANCY ELIMINATION -*- C++ -*-===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -130,7 +130,17 @@ FillInBasicExpressionInfo(Instruction &I, BasicExpression *E) {
   E->setOpcode(I.getOpcode());
 
   for (auto &O : I.operands()) {
-    AllConstant &= isa<Constant>(O);
+    if (auto *C = dyn_cast<Constant>(O)) {
+      AllConstant &= true;
+      // This is the first time we see this Constant
+      if (!ValueToCOExp[C]) {
+        auto COExp = CreateConstantExpression(*C);
+        ExpToValue[COExp] = C;
+        ValueToExp[C] = COExp;
+        COExpToValue[COExp] = C;
+        ValueToCOExp[C] = COExp;
+      }
+    }
     E->addOperand(O);
   }
 
@@ -167,16 +177,32 @@ CheckSimplificationResults(Expression *E, Instruction &I, Value *V) {
 
     // cast<BasicExpression>(E)->deallocateOperands(ArgRecycler);
     // ExpressionAllocator.Deallocate(E);
+    // return CreateConstantExpression(*C);
+    // FIXME ignore contants for now
     return CreateIgnoredExpression(I);
   } else if (isa<Argument>(V) || isa<GlobalVariable>(V)) {
     DEBUG(dbgs() << "Simplified " << I << " to "
                  << " variable " << *V << "\n");
     // cast<BasicExpression>(E)->deallocateOperands(ArgRecycler);
     // ExpressionAllocator.Deallocate(E);
-    return CreateIgnoredExpression(I);
+    return CreateVariableExpression(*V);
   }
 
   return nullptr;
+}
+
+ConstantExpression *SSAPRE::
+CreateConstantExpression(Constant &C) {
+  auto *E = new ConstantExpression(C);
+  E->setOpcode(C.getValueID());
+  return E;
+}
+
+VariableExpression *SSAPRE::
+CreateVariableExpression(Value &V) {
+  auto *E = new VariableExpression(V);
+  E->setOpcode(V.getValueID());
+  return E;
 }
 
 Expression * SSAPRE::
@@ -285,10 +311,9 @@ CreateBasicExpression(Instruction &I) {
 }
 
 Expression *SSAPRE::
-CreatePHIExpression(Instruction &I) {
-  auto *E = new PHIExpression();
+CreatePHIExpression(PHINode &I) {
+  auto *E = new PHIExpression(I.getParent());
   FillInBasicExpressionInfo(I, E);
-  // Very simple method, we do not try check for undef etc
   return E;
 }
 
@@ -310,7 +335,7 @@ SSAPRE::CreateExpression(Instruction &I) {
     // E = performSymbolicAggrValueEvaluation(I);
     break;
   case Instruction::PHI:
-    E = CreatePHIExpression(I);
+    E = CreatePHIExpression(cast<PHINode>(I));
     break;
   case Instruction::Call:
     // E = performSymbolicCallEvaluation(I);
@@ -380,6 +405,54 @@ IgnoreExpression(const Expression &E) {
   return ET == ET_Ignored || ET == ET_Unknown;
 }
 
+// void SSAPRE::
+// SetCommonProto(PHIExpression &PHI) {
+//   // Been here before
+//   if (PHI.isCommonPExprSet())
+//     return;
+//
+//   Expression *PE = nullptr;
+//   for (auto &O : PHI.getOperands()) {
+//     auto E = ValueToExp[O];
+//     // We are interested in something "producing" an Expression
+//     if (!BasicExpression::classof(E))
+//       continue;
+//
+//     // If the operand is a PHI by itself we need to recurse on it
+//     if (auto *P = dyn_cast<PHIExpression>(&E)) {
+//       // Do not recurse if the PE is already set
+//       if (!P->isCommonPExprSet()) {
+//         SetCommonProto(*P);
+//       }
+//       // If there is no common PE for P we set mismatch for PHI
+//       if (!P->hasCommonPExpr()) {
+//         PHI.setCommonPExpr(PHIExpression::getPExprMismatch());
+//         return;
+//       // If there is a common PE but it does not match our current PE
+//       // we set PHI's mismatch
+//       } else if (PE && PE != P->getCommonPExpr()){
+//         PHI.setCommonPExpr(PHIExpression::getPExprMismatch());
+//         return;
+//       // Otherwise set(or reset) PE
+//       } else {
+//         PE = P->getCommonPExpr();
+//       }
+//     // Otherwise just check Proto Expression for the Expression
+//     } else {
+//       auto OPE = VExprToPExpr[E];
+//       if (PE && PE != OPE) {
+//         PHI.setCommonPExpr(PHIExpression::getPExprMismatch());
+//         return;
+//       } else {
+//         PE = (Expression *)OPE;
+//       }
+//     }
+//   }
+//
+//   assert (PE && "PE must not be null");
+//   PHI.setCommonPExpr(PE);
+// }
+
 void SSAPRE::
 PrintDebug(const std::string &Caption) {
   dbgs() << "\n" << Caption;
@@ -439,13 +512,25 @@ PrintDebug(const std::string &Caption) {
 }
 
 void SSAPRE::
-Init() {
-  unsigned ICount = 1;
+Init(Function &F) {
+  for (auto &A : F.args()) {
+    auto VAExp = CreateVariableExpression(A);
+    ExpToValue[VAExp] = &A;
+    ValueToExp[&A] = VAExp;
+    VAExpToValue[VAExp] = &A;
+    ValueToVAExp[&A] = VAExp;
+  }
+
+  unsigned ICount = 0;
   // DFSToInstr.emplace_back(nullptr);
 
   DenseMap<const DomTreeNode *, unsigned> RPOOrdering;
   unsigned Counter = 0;
   for (auto &B : *RPOT) {
+    if (!B->getSinglePredecessor()) {
+      JoinBlocks.insert(B);
+    }
+
     auto *Node = DT->getNode(B);
     assert(Node && "RPO and Dominator tree should have same reachability");
 
@@ -470,6 +555,8 @@ Init() {
 
       assert(PE && VE && "Oh No!");
 
+      ExpToValue[VE] = &I;
+      ValueToExp[&I] = VE;
       BlockToFactors.insert({B, {}});
       InstToVExpr[&I] = VE;
       VExprToInst[VE] = &I;
@@ -581,6 +668,55 @@ Fini() {
 
 void SSAPRE::
 FactorInsertion() {
+  // We examine each join block first to find already "materialized" Factors
+  for (auto B : JoinBlocks) {
+    for (auto &I : *B) {
+      // When we reach first non-phi instruction we stop
+      if (&I == B->getFirstNonPHI()) break;
+
+      if (auto *PHI = dyn_cast<PHINode>(&I)) {
+        const Expression * PE = nullptr;
+        bool Same = true;
+        for (auto &Use : PHI->operands()) {
+          auto UVE = ValueToExp[Use.get()];
+          auto UPE = VExprToPExpr[UVE];
+
+          // If the first operand, just set PE and continue
+          if (!PE) {
+            PE = UPE;
+            continue;
+          }
+
+          // The Protos mismatch, nothing to do here
+          if (PE != UPE) {
+            Same = false;
+            break;
+          }
+        }
+
+        // If all the operands are the same we have a materialized Factor here,
+        // so we need to create a Factor instance and link it with this PHI.
+        if (Same) {
+          auto PHIE = cast<PHIExpression>(ValueToExp[PHI]);
+          auto F = CreateFactorExpression(*PE, *B);
+
+          F->setLinkedPHI(PHIE);
+
+          // Set already know expression versions
+          for (unsigned i = 0, l = PHI->getNumOperands(); i < l; ++i) {
+            auto UVE = ValueToExp[PHI->getOperand(i)];
+            F->setVExpr(i, UVE);
+          }
+
+          BlockToFactors[B].insert({F});
+          FactorToBlock[F] = B;
+          Substitutions[F] = F;
+          FExprs.insert(F);
+        }
+      }
+    }
+  }
+
   // Factors are inserted in two cases:
   //   - for each block in expressions IDF
   //   - for each phi of expression operand, which indicates expression alteration
@@ -598,15 +734,51 @@ FactorInsertion() {
     IDFs.calculate(IDF);
 
     for (const auto &B : IDF) {
-      // Exit blocks with no Expression use do not require Factor for it
-      if (B->getTerminator()->getNumSuccessors() == 0 &&
-          PExprToBlocks[PE].count(B) == 0)
-        continue;
-      auto F = CreateFactorExpression(*PE, *B);
-      BlockToFactors[B].insert({F});
-      FactorToBlock[F] = B;
-      Substitutions[F] = F;
-      FExprs.insert(F);
+      // We only need to insert a Factor at a merge point when it reaches a later
+      // occurance(a DEF at this point) of the expression. A later occurance will
+      // have a bigger DFS number;
+      bool ShouldInsert = false;
+      // Starting DFS
+      auto DFS = InstrDFS[&B->front()];
+      // FIXME remove the cycle
+      while (DFS < DFSToInstr.size()) {
+        auto I = DFSToInstr[DFS++];
+        auto OE = ValueToExp[I];
+        auto OPE = VExprToPExpr[OE];
+
+        // If Proto of the occurance matches the PE we should insert here
+        if (OPE == PE) {
+          ShouldInsert = true;
+          break;
+        }
+      }
+
+      // If we do not insert just continue
+      if (!ShouldInsert) continue;
+
+      // True if a Factor for this Expression with exactly the same arguments
+      // exists. There are two possibilities for arguments equality, there either
+      // none which means it wasn't versioned yet, or there are versions(or rather
+      // expression definitions) which means they were spawned out of PHIs. We
+      // are concern with the first case for now.
+      bool FactorExists = false;
+      // FIXME remove the cycle
+      for (auto &P : BlockToFactors) {
+        for (auto F : P.getSecond()) {
+          if (F->getVExprNum() == 0) {
+            FactorExists = true;
+            break;
+          }
+        }
+      }
+
+      if (!FactorExists) {
+        auto F = CreateFactorExpression(*PE, *B);
+        BlockToFactors[B].insert({F});
+        FactorToBlock[F] = B;
+        Substitutions[F] = F;
+        FExprs.insert(F);
+      }
     }
 
     // TODO
@@ -617,15 +789,15 @@ FactorInsertion() {
     // That this step is before Renaming thus operands of the expression inside
     // this phi-ud graph won't have actual versions, though they do have
     // "a version" within LLVM SSA space.
-    if (const auto *BE = dyn_cast<const BasicExpression>(PE)) {
-      for (auto &O : BE->getOperands()) {
-        if (const auto *PHI = dyn_cast<const PHINode>(O)) {
-          auto B = PHI->getParent();
-          auto F = CreateFactorExpression(*PE, *B);
-          BlockToFactors[B].insert({F});
-        }
-      }
-    }
+    // if (const auto *BE = dyn_cast<const BasicExpression>(PE)) {
+    //   for (auto &O : BE->getOperands()) {
+    //     if (const auto *PHI = dyn_cast<const PHINode>(O)) {
+    //       auto B = PHI->getParent();
+    //       auto F = CreateFactorExpression(*PE, *B);
+    //       BlockToFactors[B].insert({F});
+    //     }
+    //   }
+    // }
   }
 }
 
@@ -661,14 +833,28 @@ Rename() {
     // instruction's in the block
     auto FSDFS = InstrSDFS[&B->front()];
 
-    // Set Factors' versions
+    // Set PHI versions first
+    for (auto &I : *B) {
+      if (&I == B->getFirstNonPHI())
+        break;
+      auto &VE = InstToVExpr[&I];
+      auto &PE = VExprToPExpr[VE];
+      VE->setVersion(PExprToCounter[PE]++);
+    }
+
+    // Then Factors
     for (auto FE : BlockToFactors[B]) {
       auto &PE = FE->getPExpr();
       FE->setVersion(PExprToCounter[&PE]++);
       PExprToVExprStack[&PE].push({FSDFS, FE});
     }
 
+    // And the rest of the instructions
     for (auto &I : *B) {
+      // Skip already passed PHIs
+      if (&I != B->getFirstNonPHI())
+        continue;
+
       auto &VE = InstToVExpr[&I];
       auto &PE = VExprToPExpr[VE];
       auto SDFS = InstrSDFS[&I];
@@ -880,7 +1066,8 @@ FinalizeVisit(BasicBlock &B) {
   for (auto &I : B) {
     auto &VE = InstToVExpr[&I];
     auto &PE = VExprToPExpr[VE];
-    if (I.isTerminator() || IgnoreExpression(*VE))
+
+    if (IgnoreExpression(*VE))
       continue;
 
     VE->setSave(false);
@@ -1003,7 +1190,8 @@ CodeMotion() {
       auto &VE = InstToVExpr[&I];
       auto &PE = VExprToPExpr[VE];
 
-      if (IgnoreExpression(*VE))
+      // Only looking at the real expression occurrances
+      if (VE->getExpressionType() != ET_Basic)
         continue;
 
       auto SDFS = InstrSDFS[&I];
@@ -1129,10 +1317,14 @@ runImpl(Function &F,
 
   RPOT = new ReversePostOrderTraversal<Function *>(&F);
 
-  Init();
+  Init(F);
 
   FactorInsertion();
   DEBUG(PrintDebug("STEP 1: F-Insertion"));
+
+  // TEST remove after
+  Fini();
+  return PreservedAnalyses::all();
 
   Rename();
   DEBUG(PrintDebug("STEP 2: Renaming"));
