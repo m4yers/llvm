@@ -246,7 +246,7 @@ class BasicExpression : public Expression {
 private:
   // typedef ArrayRecycler<Value *> RecyclerType;
   // typedef RecyclerType::Capacity RecyclerCapacity;
-  SmallVector<Value *, 2> Operands;
+  SmallVector<Value *, 2> Operands; // TODO use Expressions here
   Type *ValueType;
 
 public:
@@ -518,6 +518,8 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
   // ProtoExpression-to-Instructions map
   DenseMap<const Expression *, SmallPtrSet<const Instruction *, 5>> PExprToInsts;
 
+  DenseMap<const Expression *, DenseMap<unsigned, SmallPtrSet<Expression *, 5>>> PExprToVersions;
+
   // ProtoExpression-to-BasicBlock map
   DenseMap<const Expression *, SmallPtrSet<BasicBlock *, 5>> PExprToBlocks;
 
@@ -573,6 +575,11 @@ private:
 
   bool Dominates(const Expression *Def, const Expression *Use);
 
+  // Check whether Expression operands' definitions dominate the Factor
+  bool OperandsDominate(Expression *Exp, const FactorExpression *F);
+
+  bool FactorHasRealUse(const FactorExpression *F);
+
   // Take a Value returned by simplification of Expression E/Instruction
   // I, and see if it resulted in a simpler expression. If so, return
   // that expression.
@@ -596,6 +603,7 @@ private:
   // It is possible that a "materialized" Factor already exists in the code
   // if form of a PHI expression that joins two expressions of the same proto and
   // we need to account for that.
+  // FIXME remove this
   void SetCommonProto(PHIExpression &PHI);
 
   void PrintDebug(const std::string &Caption);

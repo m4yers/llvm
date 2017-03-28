@@ -164,6 +164,36 @@ Dominates(const Expression *Def, const Expression *Use) {
   return DT->dominates(IDef, IUse);
 }
 
+bool SSAPRE::
+OperandsDominate(Expression *Exp, const FactorExpression *Factor) {
+  for (auto &O : VExprToInst[Exp]->operands()) {
+    if (!Dominates(ValueToExp[O], Factor))
+      return false;
+  }
+  return true;
+}
+
+bool SSAPRE::
+FactorHasRealUse(const FactorExpression *F) {
+  // If Factor is linked with a PHI we need to check its uses.
+  if (auto Link = F->getLinkedPHI()) {
+    if (VExprToInst[Link]->getNumUses() != 0) {
+      return true;
+    }
+  }
+
+  bool HasRealUse = false;
+  auto &Versions = PExprToVersions[&F->getPExpr()];
+  for (auto V : Versions[F->getVersion()]) {
+    if (!FactorExpression::classof(V)
+        && VExprToInst[V]->getNumUses() != 0) {
+      HasRealUse = true;
+      break;
+    }
+  }
+  return HasRealUse;
+}
+
 Expression *SSAPRE::
 CheckSimplificationResults(Expression *E, Instruction &I, Value *V) {
   if (!V)
@@ -322,8 +352,8 @@ CreateFactorExpression(const Expression &E, const BasicBlock &B) {
   return new FactorExpression(E, B, {pred_begin(&B), pred_end(&B)});
 }
 
-Expression *
-SSAPRE::CreateExpression(Instruction &I) {
+Expression * SSAPRE::
+CreateExpression(Instruction &I) {
   if (I.isTerminator()) {
     return CreateIgnoredExpression(I);
   }
@@ -562,6 +592,11 @@ Init(Function &F) {
       VExprToInst[VE] = &I;
       VExprToPExpr[VE] = PE;
       Substitutions[VE] = VE;
+
+      if (!PExprToVersions.count(PE)) {
+        PExprToVersions.insert({PE,
+            DenseMap<unsigned,SmallPtrSet<Expression *, 5>>()});
+      }
 
       if (!PExprToVExprs.count(PE)) {
         PExprToVExprs.insert({PE, {VE}});
@@ -833,7 +868,8 @@ Rename() {
     // instruction's in the block
     auto FSDFS = InstrSDFS[&B->front()];
 
-    // Set PHI versions first
+    // Set PHI versions first, since factors regarded as occurring at the end
+    // of the predecessor blocks
     for (auto &I : *B) {
       if (&I == B->getFirstNonPHI())
         break;
@@ -844,6 +880,9 @@ Rename() {
 
     // Then Factors
     for (auto FE : BlockToFactors[B]) {
+      // Linked Factors are ignored, since they just ride along till Finalize
+      // ??? On the other hand shall we compute DownSafe for them?
+      if (FE->getLinkedPHI()) continue;
       auto &PE = FE->getPExpr();
       FE->setVersion(PExprToCounter[&PE]++);
       PExprToVExprStack[&PE].push({FSDFS, FE});
@@ -898,31 +937,86 @@ Rename() {
       auto *VEStackTopF = VEStackTop
                             ? dyn_cast<FactorExpression>(VEStackTop)
                             : nullptr;
-      if (VEStackTop && (VExprToPExpr[VEStackTop] == PE ||
-            (VEStackTopF && &VEStackTopF->getPExpr() == PE))) {
-        // TODO Here we campare VEStackTop used operands' versions against
-        // current operands' versions on their respected stacks, if they match
-        // we use its version, otherwise assign a new one
-
-        // If the top of stack contains take its version
-        VE->setVersion(VEStackTop->getVersion());
-        // Set top of the stack as a defining occurrance for the current
-        // Expression
-        Substitutions[VE] = VEStackTop;
-      } else {
-        // Otherwise assign new version
+      // Empty stack
+      if (!VEStackTop) {
         VE->setVersion(PExprToCounter[PE]++);
+        VEStack.push({SDFS, VE});
+      // Factor
+      } else if (VEStackTopF) {
+        // If every operands' definition dominates this Factor we are dealing
+        // with the same expression and assign Factor's version
+        if (OperandsDominate(VE, VEStackTopF)) {
+          VE->setVersion(VEStackTop->getVersion());
+          Substitutions[VE] = VEStackTop;
+        // Otherwise VE's operand(s) is(were) defined in this block and this
+        // is indeed a new expression version
+        } else {
+          VE->setVersion(PExprToCounter[PE]++);
+          VEStack.push({SDFS, VE});
 
-        // STEP 3 Init: DownSafe
-        // If the top of the stack contains a Factor expression we clear its
-        // DownSafe flag because its result is not used and not anticipated
-        if (VEStackTop && FactorExpression::classof(VEStackTop)) {
-          auto *F = dyn_cast<FactorExpression>(VEStackTop);
-          F->setDownSafe(false);
+          // STEP 3 Init: DownSafe
+          // If the top of the stack contains a Factor expression we clear its
+          // DownSafe flag because its result is not used and not anticipated
+          if (VEStackTop && FactorExpression::classof(VEStackTop)) {
+            auto *F = dyn_cast<FactorExpression>(VEStackTop);
+            F->setDownSafe(false);
+          }
+        }
+      // Real occurrence
+      } else {
+        // We need to campare all operands versions, if they don't match we are
+        // dealing with a new expression
+        bool SameVersions = true;
+        auto VEBE = dyn_cast<BasicExpression>(VE);
+        auto VEStackTopBE = dyn_cast<BasicExpression>(VEStackTop);
+        for (unsigned i = 0, l = VEBE->getNumOperands(); i < l; ++l) {
+          if (ValueToExp[VEBE->getOperand(i)]->getVersion() !=
+              ValueToExp[VEStackTopBE->getOperand(i)]->getVersion()) {
+            SameVersions = false;
+            break;
+          }
+        }
+
+        if (SameVersions) {
+          VE->setVersion(VEStackTop->getVersion());
+          Substitutions[VE] = VEStackTop;
+        } else {
+          VE->setVersion(PExprToCounter[PE]++);
+          VEStack.push({SDFS, VE});
         }
       }
 
-      VEStack.push({SDFS, VE});
+      PExprToVersions[PE][VE->getVersion()].insert(VE);
+
+      // if (VEStackTop) {
+      //   // TODO Here we campare VEStackTop used operands' versions against
+      //   // current operands' versions on their respected stacks, if they match
+      //   // we use its version, otherwise assign a new one. If it happens that
+      //   // a Factor is on top of the stack we check whether its operands'
+      //   // definitions dominate this Factor, otherwise assign a new version
+      //   //
+      //   // For now every Expression after its Factor assumes its version since
+      //   // its operands are defined before this Factor.
+      //
+      //   // If the top of stack contains take its version
+      //   VE->setVersion(VEStackTop->getVersion());
+      //   // Set top of the stack as a defining occurrance for the current
+      //   // Expression
+      //   Substitutions[VE] = VEStackTop;
+      // } else {
+      //   // Otherwise assign new version
+      //   VE->setVersion(PExprToCounter[PE]++);
+      //
+      //   // STEP 3 Init: DownSafe
+      //   // If the top of the stack contains a Factor expression we clear its
+      //   // DownSafe flag because its result is not used and not anticipated
+      //   // if (VEStackTop && FactorExpression::classof(VEStackTop)) {
+      //   //   auto *F = dyn_cast<FactorExpression>(VEStackTop);
+      //   //   F->setDownSafe(false);
+      //   // }
+      //
+      //   VEStack.push({SDFS, VE});
+      // }
     }
 
     // For a terminator we need to visit every cfg successor of this block
@@ -930,31 +1024,52 @@ Rename() {
     auto *T = B->getTerminator();
     for (auto S : T->successors()) {
       for (auto F : BlockToFactors[S]) {
-        auto &VEStack = PExprToVExprStack[&F->getPExpr()];
+        auto PE = &F->getPExpr();
+        auto &VEStack = PExprToVExprStack[PE];
         size_t PI = F->getPredIndex(B);
         assert(PI != -1UL && "Should not be the case");
         auto VEStackTop = VEStack.empty() ? nullptr : VEStack.top().second;
         F->setVExpr(PI, VEStack.empty() ? &BExpr : VEStackTop);
 
         // STEP 3 Init: HasRealUse
-        // We set HasRealUse to True for an Factors' operands if they
-        // reference a real instruction/expression, and not some another
-        // Factor or Factor's operand definition; the last is TBD
-        F->setHasRealUse(PI, VEStackTop && BasicExpression::classof(VEStackTop));
+        bool HasRealUse = false;
+        if (VEStackTop) {
+          // To check Factor's usage we need to check usage of the Expressions
+          // of the same version
+          if (FactorExpression::classof(VEStackTop)) {
+            HasRealUse = FactorHasRealUse((FactorExpression *)VEStackTop);
+          // If it is a real expression we check the usage directly
+          } else if (BasicExpression::classof(VEStackTop)) {
+            auto Inst = VExprToInst[VEStackTop];
+            int NumUses = Inst->getNumUses();
+            if (NumUses == 0) {
+              HasRealUse = false;
+            // If the Value is used by a PHI it is not counted as a use
+            } else {
+              for (auto U : Inst->users()) {
+                if (!PHINode::classof(U)) {
+                  HasRealUse = true;
+                  break;
+                }
+              }
+            }
+          }
+        }
+
+        F->setHasRealUse(PI, HasRealUse);
       }
     }
 
-    // FIXME Check if this is correct
     // STEP 3 Init: DownSafe
     // We set Factor's DownSafe safe to False if it is the last Expression's
     // occurence before program exit.
     if (T->getNumSuccessors() == 0) {
       for (auto &P : PExprToVExprStack) {
         auto &VEStack = P.getSecond();
-        if (VEStack.empty())
-          continue;
+        if (VEStack.empty()) continue;
         if (auto *F = dyn_cast<FactorExpression>(VEStack.top().second)) {
-          F->setDownSafe(false);
+          if (!FactorHasRealUse(F))
+            F->setDownSafe(false);
         }
       }
     }
@@ -1322,15 +1437,15 @@ runImpl(Function &F,
   FactorInsertion();
   DEBUG(PrintDebug("STEP 1: F-Insertion"));
 
-  // TEST remove after
-  Fini();
-  return PreservedAnalyses::all();
-
   Rename();
   DEBUG(PrintDebug("STEP 2: Renaming"));
 
   DownSafety();
   DEBUG(PrintDebug("STEP 3: DownSafety"));
+
+  // TEST remove after
+  Fini();
+  return PreservedAnalyses::all();
 
   WillBeAvail();
   DEBUG(PrintDebug("STEP 4: WillBeAvail"));
