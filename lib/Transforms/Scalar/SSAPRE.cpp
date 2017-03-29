@@ -176,8 +176,8 @@ OperandsDominate(Expression *Exp, const FactorExpression *Factor) {
 bool SSAPRE::
 FactorHasRealUse(const FactorExpression *F) {
   // If Factor is linked with a PHI we need to check its uses.
-  if (auto Link = F->getLinkedPHI()) {
-    if (VExprToInst[Link]->getNumUses() != 0) {
+  if (auto PHI = FactorToPHI[F]) {
+    if (PHI->getNumUses() != 0) {
       return true;
     }
   }
@@ -732,10 +732,11 @@ FactorInsertion() {
         // If all the operands are the same we have a materialized Factor here,
         // so we need to create a Factor instance and link it with this PHI.
         if (Same) {
-          auto PHIE = cast<PHIExpression>(ValueToExp[PHI]);
           auto F = CreateFactorExpression(*PE, *B);
 
-          F->setLinkedPHI(PHIE);
+          F->setIsLinked(true);
+          FactorToPHI[F] = PHI;
+          PHIToFactor[PHI] = F;
 
           // Set already know expression versions
           for (unsigned i = 0, l = PHI->getNumOperands(); i < l; ++i) {
@@ -882,7 +883,7 @@ Rename() {
     for (auto FE : BlockToFactors[B]) {
       // Linked Factors are ignored, since they just ride along till Finalize
       // ??? On the other hand shall we compute DownSafe for them?
-      if (FE->getLinkedPHI()) continue;
+      if (FE->getIsLinked()) continue;
       auto &PE = FE->getPExpr();
       FE->setVersion(PExprToCounter[&PE]++);
       PExprToVExprStack[&PE].push({FSDFS, FE});
@@ -1074,6 +1075,11 @@ Rename() {
       }
     }
   }
+
+  // TODO Redundant Factors
+  // TODO 1. we need to spot redundant Factors that join differently versioned
+  // TODO expressions which have the same operands
+  // TODO 2. Newly versioned factors that are the same as linked factors
 }
 
 void SSAPRE::
@@ -1169,10 +1175,11 @@ FinalizeVisit(BasicBlock &B) {
   }
 
   for (auto F : BlockToFactors[&B]) {
-    F->setSave(false);
+    F->clrSave();
     F->setReload(false);
     auto V = F->getVersion();
-    if (F->getWillBeAvail()) {
+    // Potentially available or already available Factors we add to the table
+    if (F->getWillBeAvail() || F->getIsAvail()) {
       auto &PE = F->getPExpr();
       AvailDef[&PE][V] = F;
     }
@@ -1182,11 +1189,26 @@ FinalizeVisit(BasicBlock &B) {
     auto &VE = InstToVExpr[&I];
     auto &PE = VExprToPExpr[VE];
 
-    if (IgnoreExpression(*VE))
+    VE->clrSave();
+    VE->setReload(false);
+
+    // Linked PHI nodes are ignored, their Factors are processed instead
+    if (PHINode::classof(&I) && PHIToFactor[(PHINode *) &I])
       continue;
 
-    VE->setSave(false);
-    VE->setReload(false);
+    // Traverse operands and add Save count to theirs definitions
+    for (auto &O : I.operands()) {
+      if (auto &E = ValueToExp[O]) {
+        E->addSave();
+      }
+    }
+
+    // We ignore these definitions
+    if (IgnoreExpression(*VE)) {
+      VE->setSave(INT32_MAX / 2); // so it won't overflow upon addSave
+      continue;
+    }
+
     auto V = VE->getVersion();
 
     // FIXME Check whether dominance is not strict
@@ -1198,7 +1220,7 @@ FinalizeVisit(BasicBlock &B) {
       ADPE[V] = VE;
       // Or it was a Real occurrence
     } else if (BasicExpression::classof(ADPE[V])) {
-      ADPE[V]->setSave(true);
+      ADPE[V]->addSave();
       VE->setReload(true);
     }
   }
@@ -1221,6 +1243,7 @@ FinalizeVisit(BasicBlock &B) {
           // the actual insertion and rewiring will be done at Code Motion step.
           auto I = PE.getProto()->clone();
           auto VE = CreateExpression(*I);
+          VE->setSave(1);
           PExprToInsts[&PE].insert(I);
           VExprToInst[VE] = I;
           VExprToPExpr[VE] = &PE;
@@ -1238,7 +1261,7 @@ FinalizeVisit(BasicBlock &B) {
           auto V = O->getVersion();
           auto &ADPE = AvailDef[&PE];
           if (BasicExpression::classof(ADPE[V])) {
-            ADPE[V]->setSave(true);
+            ADPE[V]->addSave();
           }
         }
       }
@@ -1443,15 +1466,15 @@ runImpl(Function &F,
   DownSafety();
   DEBUG(PrintDebug("STEP 3: DownSafety"));
 
-  // TEST remove after
-  Fini();
-  return PreservedAnalyses::all();
-
   WillBeAvail();
   DEBUG(PrintDebug("STEP 4: WillBeAvail"));
 
   Finalize();
   DEBUG(PrintDebug("STEP 5: Finalize"));
+
+  // TEST remove after
+  Fini();
+  return PreservedAnalyses::all();
 
   Changed = CodeMotion();
   DEBUG(PrintDebug("STEP 6: CodeMotion"));

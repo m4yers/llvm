@@ -74,14 +74,14 @@ private:
 
   Instruction *Proto;
 
-  bool Save;
+  int Saved;
   bool Reload;
 
 public:
   Expression(ExpressionType ET = ET_Base, unsigned O = ~2U, bool S = true)
       : EType(ET), Opcode(O), Version(-1),
         Proto(nullptr),
-        Save(S), Reload(false) {}
+        Saved(1), Reload(false) {}
   // Expression(const Expression &) = delete;
   // Expression &operator=(const Expression &) = delete;
   virtual ~Expression();
@@ -96,8 +96,11 @@ public:
   Instruction * getProto() const { return Proto; }
   void setProto(Instruction *I) { Proto = I; }
 
-  int getSave() const { return Save; }
-  void setSave(int S) { Save = S; }
+  bool getSave() const { return Saved > 0; }
+  void setSave(int S) { Saved = S; }
+  void clrSave() { Saved = 0; }
+  void addSave() { Saved++; }
+  void remSave() { Saved--; }
 
   int getReload() const { return Reload; }
   void setReload(int R) { Reload = R; }
@@ -123,7 +126,7 @@ public:
 
   virtual bool equals(const Expression &O) const {
     if (EType == O.EType && Opcode == O.Opcode && Version == O.Version) {
-      assert(Save == O.Save && Reload == O.Reload &&
+      assert(Saved == O.Saved && Reload == O.Reload &&
           "Expressions are not fully equal");
       return true;
     }
@@ -133,7 +136,7 @@ public:
   virtual void printInternal(raw_ostream &OS) const {
     OS << ExpressionTypeToString(getExpressionType());
     OS << ", V: " << Version;
-    OS << ", S: " << (Save ? "T" : "F");
+    OS << ", S: " << Saved;
     OS << ", R: " << (Reload ? "T" : "F");
     OS << ", OPC: " << getOpcode() << ", ";
   }
@@ -355,9 +358,10 @@ class FactorExpression final : public Expression {
 private:
   const Expression &PE;
   const BasicBlock &BB;
-  const PHIExpression *PHI;
   SmallVector<const BasicBlock *, 8> Pred;
   SmallVector<Expression *, 8> Versions;
+
+  bool Linked;
 
   // If True expression is Anticipated on every path leading from this Factor
   bool DownSafe;
@@ -371,8 +375,9 @@ private:
 public:
   FactorExpression(const Expression &PE, const BasicBlock &BB,
                    SmallVector<const BasicBlock *, 8> P)
-      : Expression(ET_Factor), PE(PE), BB(BB), PHI(nullptr), Pred(P),
+      : Expression(ET_Factor), PE(PE), BB(BB), Pred(P),
                    Versions(P.size(), nullptr),
+                   Linked(true),
                    DownSafe(true), HasRealUse(P.size(), false),
                    CanBeAvail(true), Later(true) { }
   FactorExpression() = delete;
@@ -380,8 +385,8 @@ public:
   FactorExpression &operator=(const FactorExpression &) = delete;
   ~FactorExpression() override;
 
-  void setLinkedPHI(const PHIExpression *P) { PHI = P; }
-  const PHIExpression * getLinkedPHI() const { return PHI; }
+  void setIsLinked(bool L) { Linked = L; }
+  bool getIsLinked() const { return Linked; }
 
   const Expression& getPExpr() const { return PE; }
 
@@ -422,6 +427,11 @@ public:
 
   bool getWillBeAvail() const { return CanBeAvail && !Later; }
 
+  // This is only True when this Factor is Linked and is DownSafe. It is
+  // possible to gave False WBA at the same time. The meaning of this is that
+  // the Factor is already materialized into a PHI and this PHI is used.
+  bool getIsAvail() const { return CanBeAvail && Linked; }
+
   void setHasRealUse(unsigned P, bool HRU) { HasRealUse[P] = HRU; }
   bool getHasRealUse(unsigned P) const { return HasRealUse[P]; }
 
@@ -442,7 +452,7 @@ public:
     this->Expression::printInternal(OS);
     OS << "BB: ";
     BB.printAsOperand(OS, false);
-    OS << ", LNK: " << (PHI ? "T" : "F");
+    OS << ", LNK: " << Linked;
     OS << ", V: <";
     for (unsigned i = 0, l = Versions.size(); i < l; ++i) {
       if (Versions[i]) {
@@ -463,14 +473,9 @@ public:
     OS << ", CBA: " << (CanBeAvail ? "T" : "F");
     OS << ", L: " << (Later ? "T" : "F");
     OS << ", WBA: " << (getWillBeAvail() ? "T" : "F");
+    OS << ", AV: " << (getIsAvail() ? "T" : "F");
   }
 }; // class FactorExpression
-
-class FactorRenamingContext {
-public:
-  unsigned Counter;
-  std::stack<int> Stack;
-};
 
 } // end namespace ssapre
 
@@ -498,6 +503,9 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
   // Constants' stuff
   DenseMap<ConstantExpression *, Value *> COExpToValue;
   DenseMap<const Value *, ConstantExpression *> ValueToCOExp;
+
+  DenseMap<const FactorExpression *, const PHINode *> FactorToPHI;
+  DenseMap<const PHINode *, const FactorExpression *> PHIToFactor;
 
   // DFS info.
   // This contains a mapping from Instructions to DFS numbers.
