@@ -432,7 +432,10 @@ CreateExpression(Instruction &I) {
 bool SSAPRE::
 IgnoreExpression(const Expression &E) {
   auto ET = E.getExpressionType();
-  return ET == ET_Ignored || ET == ET_Unknown;
+  return ET == ET_Ignored  ||
+         ET == ET_Unknown  ||
+         ET == ET_Variable ||
+         ET == ET_Constant;
 }
 
 // void SSAPRE::
@@ -507,10 +510,10 @@ PrintDebug(const std::string &Caption) {
     auto I = dyn_cast<Instruction>(V);
     dbgs() << "\n" << InstrDFS[I];
     dbgs() << "\t" << InstrSDFS[I];
-    if (KillList.count((Instruction *)I))
-      dbgs() << "\t(deleted)";
-    else
+    if (ValueToExp[I]->getSave() && I->getParent())
       dbgs() << "\t" << *I;
+    else
+      dbgs() << "\t(deleted)";
   }
 
   dbgs() << "\nBlockToFactors\n";
@@ -677,12 +680,6 @@ Init(Function &F) {
 // FIXME Do proper memory management
 void SSAPRE::
 Fini() {
-  for (auto &P : PExprToInsts) {
-    auto *Proto = P.getFirst()->getProto();
-    if (Proto)
-      Proto->dropAllReferences();
-  }
-
   InstrDFS.clear();
   InstrSDFS.clear();
   DFSToInstr.clear();
@@ -1292,9 +1289,6 @@ bool SSAPRE::
 CodeMotion() {
   bool Changed = false;
 
-  DenseMap<const Expression *, unsigned> PExprToCounter;
-  for (auto &P : PExprToInsts) PExprToCounter.insert({P.getFirst(), 1});
-
   DenseMap<const Expression *, std::stack<std::pair<unsigned, Expression *>>>
     PExprToVExprStack;
 
@@ -1302,7 +1296,6 @@ CodeMotion() {
     auto &PE = P.getFirst();
     if (IgnoreExpression(*PE))
       continue;
-    PExprToCounter.insert({PE, 0});
     PExprToVExprStack.insert({PE, {}});
   }
 
@@ -1313,8 +1306,37 @@ CodeMotion() {
 
     for (auto FE : BlockToFactors[B]) {
       auto PE = &FE->getPExpr();
-      FE->setVersion(PExprToCounter[PE]++);
-      PExprToVExprStack[PE].push({FSDFS, FE});
+      if (FE->getIsLinked()) {
+        auto PHI = (PHINode *)FactorToPHI[FE];
+        // If Factor is Linked and Available we need to replace linked PHI
+        // instruction with a real calculation.
+        if (FE->getIsAvail()) {
+          auto I = PE->getProto()->clone();
+
+          auto VE = CreateExpression(*I);
+          VE->setSave(PHI->getNumUses());
+          PExprToInsts[PE].insert(I);
+          VExprToInst[VE] = I;
+          VExprToPExpr[VE] = PE;
+          InstToVExpr[I] = VE;
+          InstrSDFS[I] = InstrSDFS[&B->front()];
+          InstrDFS[I] = InstrDFS[&B->front()];
+
+          IRBuilder<> Builder(PHI);
+          Builder.Insert(I);
+
+          PHI->replaceAllUsesWith(I);
+          KillList.push_back((Instruction *)PHI);
+
+          Changed = true;
+          // If it is not WBA and not Available we just need to remove this PHI
+        } else if (!FE->getWillBeAvail()) {
+          assert(PHI->getNumUses() == 0 && "Must not have any uses");
+          KillList.push_back((Instruction *)PHI);
+        }
+      } else {
+        PExprToVExprStack[PE].push({FSDFS, FE});
+      }
     }
 
     // Insert Instructions
@@ -1353,7 +1375,7 @@ CodeMotion() {
 
         // Replace usage
         Substitutions[VE] = VEStackTop;
-        KillList.insert(&I);
+        ReloadList.insert(&I);
         // auto &RI = VExprToInst[VEStackTop];
         // I.replaceAllUsesWith(RI);
 
@@ -1363,11 +1385,12 @@ CodeMotion() {
           if (VEI != -1UL)
             F->setVExpr(VEI, VEStackTop);
         }
-        Changed = true;
       } else {
-        // assert(I.hasNUses(0) && "This instructin must not have any uses");
-        KillList.insert(&I);
-        Changed = true;
+        for (auto U : I.users()) {
+          assert(PHINode::classof(U) &&
+              "This instructin must not have any uses except PHIs");
+        }
+        KillList.push_back(&I);
       }
     }
 
@@ -1391,6 +1414,8 @@ CodeMotion() {
     //  - Factor
     //  - Saved Expression
     for (auto F : P.getSecond()) {
+      // No PHI insertion for Linked Factors
+      if (F->getIsLinked()) continue;
       bool hasFactors = false;
       bool hasSaved = false;
       bool hasDeleted = false;
@@ -1420,19 +1445,66 @@ CodeMotion() {
     }
   }
 
-  // Delete marked instructions
-  for (auto I : KillList) {
-    I->printAsOperand(dbgs());
-    // If there are any uses of this Definition, replace them with an appropriate
-    // version
+  // Reload marked instructions
+  for (auto I : ReloadList) {
     if (I->hasNUsesOrMore(1)) {
       auto *Def = Substitutions[InstToVExpr[I]];
-      while (Def != Substitutions[Def])
+      while (Def != Substitutions[Def]) {
         Def = Substitutions[Def];
+      }
+
       I->replaceAllUsesWith(VExprToInst[Def]);
+
+      // Increase usage count of the replacing definition
+      Def->addSave();
     }
+
+    KillList.push_back(I);
+    Changed = true;
+  }
+
+  // Kill'em all
+  // Before return we want to calculate effects of instruction deletion on the
+  // other instructions. For example if we delete the last user of a value and
+  // the instruction that produces this value does not have any side effects we
+  // can delete it, and so on.
+  for (unsigned i = 0, l = KillList.size(); i < l; ++i) {
+    auto I = KillList[i];
+
+    for (auto U : I->users()) {
+      assert(PHINode::classof(U) &&
+          "This instructin must not have any uses except PHIs");
+    }
+
+    // Decrease usage count of the instruction's operands
+    for (auto &O : I->operands()) {
+      if (auto &OE = ValueToExp[O]) {
+        if (IgnoreExpression(*OE)) continue;
+        bool AlreadyInKill = !OE->getSave();
+        OE->remSave();
+        if (!AlreadyInKill && !OE->getSave()) {
+          KillList.push_back(VExprToInst[OE]);
+          l++;
+        }
+      }
+    }
+
+    // Just drop the references for now
     I->dropAllReferences();
-    I->eraseFromParent();
+  }
+
+  // Clear Protos
+  for (auto &P : PExprToInsts) {
+    auto *Proto = P.getFirst()->getProto();
+    if (Proto)
+      Proto->dropAllReferences();
+  }
+
+
+  // Remove instructions completely
+  while (!KillList.empty()) {
+    KillList.pop_back_val()->eraseFromParent();
+    Changed = true;
   }
 
   return Changed;
@@ -1469,12 +1541,12 @@ runImpl(Function &F,
   WillBeAvail();
   DEBUG(PrintDebug("STEP 4: WillBeAvail"));
 
+  // TEST remove after
+  // Fini();
+  // return PreservedAnalyses::all();
+
   Finalize();
   DEBUG(PrintDebug("STEP 5: Finalize"));
-
-  // TEST remove after
-  Fini();
-  return PreservedAnalyses::all();
 
   Changed = CodeMotion();
   DEBUG(PrintDebug("STEP 6: CodeMotion"));
