@@ -400,9 +400,9 @@ public:
     return -1;
   }
 
-  size_t getVExprNum() { return Versions.size(); }
+  size_t getVExprNum() const { return Versions.size(); }
   void setVExpr(unsigned P, Expression * V) { Versions[P] = V; }
-  Expression * getVExpr(unsigned P) { return Versions[P]; }
+  Expression * getVExpr(unsigned P) const { return Versions[P]; }
   size_t getVExprIndex(Expression &V) {
     for(size_t i = 0, l = Versions.size(); i < l; ++i) {
       if (Versions[i] == &V)
@@ -596,8 +596,6 @@ private:
   // Take a Value returned by simplification of Expression E/Instruction
   // I, and see if it resulted in a simpler expression. If so, return
   // that expression.
-  // TODO: Once finished, this should not take an Instruction, we only
-  // use it for printing.
   Expression * CheckSimplificationResults(Expression *E,
                                           Instruction &I,
                                           Value *V);
@@ -612,12 +610,6 @@ private:
   Expression * CreateExpression(Instruction &I);
 
   bool IgnoreExpression(const Expression &E);
-
-  // It is possible that a "materialized" Factor already exists in the code
-  // if form of a PHI expression that joins two expressions of the same proto and
-  // we need to account for that.
-  // FIXME remove this
-  void SetCommonProto(PHIExpression &PHI);
 
   void PrintDebug(const std::string &Caption);
 

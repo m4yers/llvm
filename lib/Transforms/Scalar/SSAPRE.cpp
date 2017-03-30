@@ -455,54 +455,6 @@ IgnoreExpression(const Expression &E) {
          ET == ET_Constant;
 }
 
-// void SSAPRE::
-// SetCommonProto(PHIExpression &PHI) {
-//   // Been here before
-//   if (PHI.isCommonPExprSet())
-//     return;
-//
-//   Expression *PE = nullptr;
-//   for (auto &O : PHI.getOperands()) {
-//     auto E = ValueToExp[O];
-//     // We are interested in something "producing" an Expression
-//     if (!BasicExpression::classof(E))
-//       continue;
-//
-//     // If the operand is a PHI by itself we need to recurse on it
-//     if (auto *P = dyn_cast<PHIExpression>(&E)) {
-//       // Do not recurse if the PE is already set
-//       if (!P->isCommonPExprSet()) {
-//         SetCommonProto(*P);
-//       }
-//       // If there is no common PE for P we set mismatch for PHI
-//       if (!P->hasCommonPExpr()) {
-//         PHI.setCommonPExpr(PHIExpression::getPExprMismatch());
-//         return;
-//       // If there is a common PE but it does not match our current PE
-//       // we set PHI's mismatch
-//       } else if (PE && PE != P->getCommonPExpr()){
-//         PHI.setCommonPExpr(PHIExpression::getPExprMismatch());
-//         return;
-//       // Otherwise set(or reset) PE
-//       } else {
-//         PE = P->getCommonPExpr();
-//       }
-//     // Otherwise just check Proto Expression for the Expression
-//     } else {
-//       auto OPE = VExprToPExpr[E];
-//       if (PE && PE != OPE) {
-//         PHI.setCommonPExpr(PHIExpression::getPExprMismatch());
-//         return;
-//       } else {
-//         PE = (Expression *)OPE;
-//       }
-//     }
-//   }
-//
-//   assert (PE && "PE must not be null");
-//   PHI.setCommonPExpr(PE);
-// }
-
 void SSAPRE::
 PrintDebug(const std::string &Caption) {
   dbgs() << "\n" << Caption;
@@ -1110,10 +1062,40 @@ Rename() {
     }
   }
 
+  // TODO clean this up
   // TODO Redundant Factors
   // TODO 1. we need to spot redundant Factors that join differently versioned
   // TODO expressions which have the same operands
   // TODO 2. Newly versioned factors that are the same as linked factors
+
+  SmallPtrSet<FactorExpression *, 32> FactorKillList;
+  for (auto P : FactorToPHI) {
+    auto LF = (FactorExpression *)P.getFirst();
+    for (auto F : FExprs) {
+      if (F->getIsLinked() || LF == F) continue;
+      bool Same = true;
+      for (unsigned i = 0, l = LF->getVExprNum(); i < l; ++i) {
+        if (LF->getVExpr(i) != F->getVExpr(i)) {
+          Same = false;
+          break;
+        }
+      }
+      if (Same) {
+        FactorKillList.insert(F);
+      }
+    }
+  }
+
+  // Remove all stuff related
+  for (auto F : FactorKillList) {
+    if (auto P = F->getProto()) {
+      P->dropAllReferences();
+    }
+    FExprs.erase(F);
+    auto B = FactorToBlock[F];
+    BlockToFactors[B].erase(F);
+    FactorToBlock.erase(F);
+  }
 }
 
 void SSAPRE::
