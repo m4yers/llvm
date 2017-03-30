@@ -140,6 +140,8 @@ FillInBasicExpressionInfo(Instruction &I, BasicExpression *E) {
         COExpToValue[COExp] = C;
         ValueToCOExp[C] = COExp;
       }
+    } else {
+      AllConstant = false;
     }
     E->addOperand(O);
   }
@@ -148,7 +150,13 @@ FillInBasicExpressionInfo(Instruction &I, BasicExpression *E) {
 }
 
 bool SSAPRE::
-Dominates(const Expression *Def, const Expression *Use) {
+VariableOrConstant(const Expression &E) {
+  return E.getExpressionType() == ET_Variable ||
+         E.getExpressionType() == ET_Constant;
+}
+
+bool SSAPRE::
+NotStrictlyDominates(const Expression *Def, const Expression *Use) {
   assert (Def && Use && "Def or Use is null");
   // If the expression is a Factor we need to use the first non-phi instruction
   // of the block it belongs to
@@ -161,13 +169,20 @@ Dominates(const Expression *Def, const Expression *Use) {
                 : VExprToInst[Use];
 
   assert (IDef && IUse && "IDef or IUse is null");
+
+  // Not Strictly
+  if (IDef == IUse)
+    return true;
+
   return DT->dominates(IDef, IUse);
 }
 
 bool SSAPRE::
 OperandsDominate(Expression *Exp, const FactorExpression *Factor) {
   for (auto &O : VExprToInst[Exp]->operands()) {
-    if (!Dominates(ValueToExp[O], Factor))
+    auto E = ValueToExp[O];
+    if (VariableOrConstant(*E)) continue;
+    if (!NotStrictlyDominates(E, Factor))
       return false;
   }
   return true;
@@ -376,13 +391,24 @@ CreateExpression(Instruction &I) {
   case Instruction::Load:
     // E = performSymbolicLoadEvaluation(I);
     break;
-  case Instruction::BitCast: {
+  case Instruction::Trunc:
+  case Instruction::ZExt:
+  case Instruction::SExt:
+  case Instruction::FPTrunc:
+  case Instruction::FPExt:
+  case Instruction::FPToUI:
+  case Instruction::FPToSI:
+  case Instruction::UIToFP:
+  case Instruction::SIToFP:
+  case Instruction::PtrToInt:
+  case Instruction::IntToPtr:
+  case Instruction::BitCast:
     E = CreateBasicExpression(I);
-  } break;
+    break;
   case Instruction::ICmp:
-  case Instruction::FCmp: {
+  case Instruction::FCmp:
     // E = performSymbolicCmpEvaluation(I);
-  } break;
+    break;
   case Instruction::Add:
   case Instruction::FAdd:
   case Instruction::Sub:
@@ -401,17 +427,8 @@ CreateExpression(Instruction &I) {
   case Instruction::And:
   case Instruction::Or:
   case Instruction::Xor:
-  case Instruction::Trunc:
-  case Instruction::ZExt:
-  case Instruction::SExt:
-  case Instruction::FPToUI:
-  case Instruction::FPToSI:
-  case Instruction::UIToFP:
-  case Instruction::SIToFP:
-  case Instruction::FPTrunc:
-  case Instruction::FPExt:
-  case Instruction::PtrToInt:
-  case Instruction::IntToPtr:
+    E = CreateBasicExpression(I);
+    break;
   case Instruction::Select:
   case Instruction::ExtractElement:
   case Instruction::InsertElement:
@@ -680,21 +697,41 @@ Init(Function &F) {
 // FIXME Do proper memory management
 void SSAPRE::
 Fini() {
+  JoinBlocks.clear();
+
+  ExpToValue.clear();
+  ValueToExp.clear();
+
+  VAExpToValue.clear();
+  ValueToVAExp.clear();
+
+  COExpToValue.clear();
+  ValueToCOExp.clear();
+
   InstrDFS.clear();
   InstrSDFS.clear();
+
+  FactorToPHI.clear();
+  PHIToFactor.clear();
   DFSToInstr.clear();
+
   InstToVExpr.clear();
   VExprToInst.clear();
+  VExprToPExpr.clear();
+  PExprToVersions.clear();
   PExprToInsts.clear();
   PExprToBlocks.clear();
+  PExprToVExprs.clear();
+
   BlockToFactors.clear();
   FactorToBlock.clear();
-  PExprToVExprs.clear();
-  VExprToPExpr.clear();
+
   FExprs.clear();
+
   AvailDef.clear();
   BlockToInserts.clear();
   Substitutions.clear();
+  ReloadList.clear();
   KillList.clear();
 }
 
@@ -1208,14 +1245,20 @@ FinalizeVisit(BasicBlock &B) {
 
     auto V = VE->getVersion();
 
-    // FIXME Check whether dominance is not strict
     auto &ADPE = AvailDef[PE];
     // If there was no expression occurrence before
     // or it was an expression's operand definition
-    // or the previous expression does not dominate the current occurrence
-    if (!ADPE.count(V) || ADPE[V] == &BExpr || !Dominates(ADPE[V], VE)) {
+    // or the previous expression does not strictly dominate the current occurrence
+    if (!ADPE.count(V) || ADPE[V] == &BExpr ||
+        !NotStrictlyDominates(ADPE[V], VE)) {
       ADPE[V] = VE;
-      // Or it was a Real occurrence
+    // Or it was a Factor that for sure will be materialized, if not alredy
+    // NOTE This wasn't in the paper, only real occurances force reload
+    } else if (auto F = dyn_cast<FactorExpression>(ADPE[V])) {
+      if (F->getWillBeAvail() || F->getIsAvail()) {
+        VE->setReload(true);
+      }
+    // Or it was a Real occurrence
     } else if (BasicExpression::classof(ADPE[V])) {
       ADPE[V]->addSave();
       VE->setReload(true);
@@ -1335,8 +1378,12 @@ CodeMotion() {
           KillList.push_back((Instruction *)PHI);
         }
       } else {
-        PExprToVExprStack[PE].push({FSDFS, FE});
+        // Nothing here?
       }
+
+      // Push every Factor to the Stack regardless of the linkage, since further
+      // instructions may refer them
+      PExprToVExprStack[PE].push({FSDFS, FE});
     }
 
     // Insert Instructions
@@ -1365,13 +1412,9 @@ CodeMotion() {
         }
       }
 
-      if (VE->getSave()) {
-        // Leave it be
-        VEStack.push({SDFS, VE});
-      } else if (VE->getReload()) {
+      if (VE->getReload()) {
         auto *VEStackTop = VEStack.empty() ? nullptr : VEStack.top().second;
         assert(VEStackTop && "This must not be null");
-        assert(VEStackTop->getSave() && "This Value must be saved");
 
         // Replace usage
         Substitutions[VE] = VEStackTop;
@@ -1385,6 +1428,9 @@ CodeMotion() {
           if (VEI != -1UL)
             F->setVExpr(VEI, VEStackTop);
         }
+      } else if (VE->getSave()) {
+        // Leave it be
+        VEStack.push({SDFS, VE});
       } else {
         for (auto U : I.users()) {
           assert(PHINode::classof(U) &&
@@ -1414,8 +1460,8 @@ CodeMotion() {
     //  - Factor
     //  - Saved Expression
     for (auto F : P.getSecond()) {
-      // No PHI insertion for Linked Factors
-      if (F->getIsLinked()) continue;
+      // No PHI insertion for NotAwailable or Linked Factors
+      if (!F->getWillBeAvail() || F->getIsLinked()) continue;
       bool hasFactors = false;
       bool hasSaved = false;
       bool hasDeleted = false;
@@ -1453,12 +1499,15 @@ CodeMotion() {
         Def = Substitutions[Def];
       }
 
-      I->replaceAllUsesWith(VExprToInst[Def]);
+      assert(I != VExprToInst[Def] && "Something went wrong");
 
-      // Increase usage count of the replacing definition
-      Def->addSave();
+      // Increase Def's Save count by the number of uses of the instruction
+      Def->addSave(I->getNumUses());
+
+      I->replaceAllUsesWith(VExprToInst[Def]);
     }
 
+    InstToVExpr[I]->setSave(0);
     KillList.push_back(I);
     Changed = true;
   }

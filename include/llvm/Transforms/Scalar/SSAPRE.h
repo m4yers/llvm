@@ -99,8 +99,9 @@ public:
   bool getSave() const { return Saved > 0; }
   void setSave(int S) { Saved = S; }
   void clrSave() { Saved = 0; }
-  void addSave() { Saved++; }
   void remSave() { Saved--; }
+  void addSave() { Saved++; }
+  void addSave(int S) { Saved += S; }
 
   int getReload() const { return Reload; }
   void setReload(int R) { Reload = R; }
@@ -377,7 +378,7 @@ public:
                    SmallVector<const BasicBlock *, 8> P)
       : Expression(ET_Factor), PE(PE), BB(BB), Pred(P),
                    Versions(P.size(), nullptr),
-                   Linked(true),
+                   Linked(false),
                    DownSafe(true), HasRealUse(P.size(), false),
                    CanBeAvail(true), Later(true) { }
   FactorExpression() = delete;
@@ -580,9 +581,12 @@ private:
   // have their order swapped when canonicalizing.
   bool ShouldSwapOperands(const Value *A, const Value *B) const;
 
+  bool VariableOrConstant(const Expression & E);
+
   bool FillInBasicExpressionInfo(Instruction &I, BasicExpression *E);
 
-  bool Dominates(const Expression *Def, const Expression *Use);
+  // Not Strictly implies Def == Use -> True
+  bool NotStrictlyDominates(const Expression *Def, const Expression *Use);
 
   // Check whether Expression operands' definitions dominate the Factor
   bool OperandsDominate(Expression *Exp, const FactorExpression *F);
