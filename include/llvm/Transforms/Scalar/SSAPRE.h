@@ -357,15 +357,24 @@ public:
 
 class FactorExpression final : public Expression {
 private:
-  const Expression &PE;
   const BasicBlock &BB;
-  SmallVector<const BasicBlock *, 8> Pred;
+
+  // This is Proto Expression of the operands if they happen to be of the same
+  // Proto
+  const Expression *PE;
+
+  // This maps BB to Index inside Versions and HRU
+  DenseMap<const BasicBlock *, size_t> Pred;
+
+  // The Versioned Expressions that this Factor joins
   SmallVector<Expression *, 8> Versions;
 
+  // If True this Factor is linked to already existing PHI function
   bool Linked;
 
   // If True expression is Anticipated on every path leading from this Factor
   bool DownSafe;
+
   // True if an Operand is a Real expressin and not Factor or Expression Operand
   // definition(⊥)
   SmallVector<bool, 8> HasRealUse;
@@ -374,12 +383,9 @@ private:
   bool Later;
 
 public:
-  FactorExpression(const Expression &PE, const BasicBlock &BB,
-                   SmallVector<const BasicBlock *, 8> P)
-      : Expression(ET_Factor), PE(PE), BB(BB), Pred(P),
-                   Versions(P.size(), nullptr),
-                   Linked(false),
-                   DownSafe(true), HasRealUse(P.size(), false),
+  FactorExpression(const BasicBlock &BB)
+      : Expression(ET_Factor), BB(BB),
+                   Linked(false), DownSafe(true),
                    CanBeAvail(true), Later(true) { }
   FactorExpression() = delete;
   FactorExpression(const FactorExpression &) = delete;
@@ -389,15 +395,17 @@ public:
   void setIsLinked(bool L) { Linked = L; }
   bool getIsLinked() const { return Linked; }
 
-  const Expression& getPExpr() const { return PE; }
+  void setPExpr(const Expression *E) { PE = E; }
+  const Expression* getPExpr() const { return PE; }
 
-  size_t getPredIndex(BasicBlock * B) const {
-    for (size_t i = 0; i < Pred.size(); ++i) {
-      if (Pred[i] == B) {
-        return i;
-      }
-    }
-    return -1;
+  void addPred(const BasicBlock *B, size_t I) {
+    Pred[B] = I;
+    Versions.push_back(nullptr);
+    HasRealUse.push_back(false);
+  }
+  size_t getPredIndex(const BasicBlock * B) const {
+    assert(Pred.count(B) && "Should not be the case");
+    return Pred.lookup(B);
   }
 
   size_t getVExprNum() const { return Versions.size(); }
@@ -423,6 +431,9 @@ public:
   bool getCanBeAvail() const { return CanBeAvail; }
   void setCanBeAvail(bool CBA) { CanBeAvail = CBA; }
 
+  // Later marks the latest possible computationl point, or in other words the
+  // value does not come from predecessor and computed either here or nowhere
+  // at all
   bool getLater() const { return Later; }
   void setLater(bool L) { Later = L; }
 

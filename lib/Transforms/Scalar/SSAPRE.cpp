@@ -198,7 +198,7 @@ FactorHasRealUse(const FactorExpression *F) {
   }
 
   bool HasRealUse = false;
-  auto &Versions = PExprToVersions[&F->getPExpr()];
+  auto &Versions = PExprToVersions[F->getPExpr()];
   for (auto V : Versions[F->getVersion()]) {
     if (!FactorExpression::classof(V)
         && VExprToInst[V]->getNumUses() != 0) {
@@ -240,6 +240,7 @@ ConstantExpression *SSAPRE::
 CreateConstantExpression(Constant &C) {
   auto *E = new ConstantExpression(C);
   E->setOpcode(C.getValueID());
+  E->setVersion(-2);
   return E;
 }
 
@@ -247,6 +248,7 @@ VariableExpression *SSAPRE::
 CreateVariableExpression(Value &V) {
   auto *E = new VariableExpression(V);
   E->setOpcode(V.getValueID());
+  E->setVersion(-3);
   return E;
 }
 
@@ -364,7 +366,14 @@ CreatePHIExpression(PHINode &I) {
 
 FactorExpression *SSAPRE::
 CreateFactorExpression(const Expression &E, const BasicBlock &B) {
-  return new FactorExpression(E, B, {pred_begin(&B), pred_end(&B)});
+  auto FE = new FactorExpression(B);
+  size_t C = 0;
+  for (auto S = pred_begin(&B), EE = pred_end(&B); S != EE; ++S) {
+    FE->addPred(*S, C++);
+  }
+  FE->setPExpr(&E);
+
+  return FE;
 }
 
 Expression * SSAPRE::
@@ -549,6 +558,7 @@ Init(Function &F) {
         if (PE->equals(*EP))
           PE = (Expression *)EP;
       }
+
       if (!PE->getProto() && !IgnoreExpression(*PE)) {
         PE->setProto(I.clone());
       }
@@ -721,6 +731,7 @@ FactorInsertion() {
           auto F = CreateFactorExpression(*PE, *B);
 
           F->setIsLinked(true);
+          F->setPExpr(PE);
           FactorToPHI[F] = PHI;
           PHIToFactor[PHI] = F;
 
@@ -744,7 +755,7 @@ FactorInsertion() {
   //   - for each phi of expression operand, which indicates expression alteration
   for (auto &P : PExprToInsts) {
     auto &PE = P.getFirst();
-    if (IgnoreExpression(*PE))
+    if (IgnoreExpression(*PE) || PHIExpression::classof(PE))
       continue;
 
     // Each Expression occurrence's DF requires us to insert a Factor function,
@@ -785,12 +796,10 @@ FactorInsertion() {
       // are concern with the first case for now.
       bool FactorExists = false;
       // FIXME remove the cycle
-      for (auto &P : BlockToFactors) {
-        for (auto F : P.getSecond()) {
-          if (F->getVExprNum() == 0) {
-            FactorExists = true;
-            break;
-          }
+      for (auto F : BlockToFactors[B]) {
+        if (!F->getIsLinked() && F->getPExpr() == PE) {
+          FactorExists = true;
+          break;
         }
       }
 
@@ -869,10 +878,10 @@ Rename() {
     for (auto FE : BlockToFactors[B]) {
       // Linked Factors are ignored, since they just ride along till Finalize
       // ??? On the other hand shall we compute DownSafe for them?
-      if (FE->getIsLinked()) continue;
-      auto &PE = FE->getPExpr();
-      FE->setVersion(PExprToCounter[&PE]++);
-      PExprToVExprStack[&PE].push({FSDFS, FE});
+      // if (FE->getIsLinked()) continue;
+      auto PE = FE->getPExpr();
+      PExprToVExprStack[PE].push({FSDFS, FE});
+      FE->setVersion(PExprToCounter[PE]++);
     }
 
     // And the rest of the instructions
@@ -1011,7 +1020,7 @@ Rename() {
     auto *T = B->getTerminator();
     for (auto S : T->successors()) {
       for (auto F : BlockToFactors[S]) {
-        auto PE = &F->getPExpr();
+        auto PE = F->getPExpr();
         auto &VEStack = PExprToVExprStack[PE];
         size_t PI = F->getPredIndex(B);
         assert(PI != -1UL && "Should not be the case");
@@ -1159,7 +1168,7 @@ ComputeLater() {
   }
   for (auto F : FExprs) {
     if (F->getLater()) {
-      for (size_t i = 0, l = F->getVExprs().size(); i < l; ++i) {
+      for (size_t i = 0, l = F->getVExprNum(); i < l; ++i) {
         if (F->getHasRealUse(i) && F->getVExpr(i) != &BExpr) {
           ResetLater(*F);
           break;
@@ -1196,8 +1205,8 @@ FinalizeVisit(BasicBlock &B) {
     auto V = F->getVersion();
     // Potentially available or already available Factors we add to the table
     if (F->getWillBeAvail() || F->getIsAvail()) {
-      auto &PE = F->getPExpr();
-      AvailDef[&PE][V] = F;
+      auto PE = F->getPExpr();
+      AvailDef[PE][V] = F;
     }
   }
 
@@ -1250,7 +1259,7 @@ FinalizeVisit(BasicBlock &B) {
   for (auto S : B.getTerminator()->successors()) {
     for (auto F : BlockToFactors[S]) {
       if (F->getWillBeAvail()) {
-        auto &PE = F->getPExpr();
+        auto PE = F->getPExpr();
         auto PI = F->getPredIndex(&B);
         auto O = F->getVExpr(PI);
         // Satisfies insert if either:
@@ -1263,12 +1272,12 @@ FinalizeVisit(BasicBlock &B) {
           // NOTE
           // At this point we just create insertion lists, update F graph,
           // the actual insertion and rewiring will be done at Code Motion step.
-          auto I = PE.getProto()->clone();
+          auto I = PE->getProto()->clone();
           auto VE = CreateExpression(*I);
           VE->setSave(1);
-          PExprToInsts[&PE].insert(I);
+          PExprToInsts[PE].insert(I);
           VExprToInst[VE] = I;
-          VExprToPExpr[VE] = &PE;
+          VExprToPExpr[VE] = PE;
           InstToVExpr[I] = VE;
           InstrSDFS[I] = InstrSDFS[B.getTerminator()];
           InstrDFS[I] = InstrDFS[B.getTerminator()];
@@ -1281,7 +1290,7 @@ FinalizeVisit(BasicBlock &B) {
           }
         } else {
           auto V = O->getVersion();
-          auto &ADPE = AvailDef[&PE];
+          auto &ADPE = AvailDef[PE];
           if (BasicExpression::classof(ADPE[V])) {
             ADPE[V]->addSave();
           }
@@ -1330,35 +1339,36 @@ CodeMotion() {
     auto FSDFS = InstrSDFS[&B->front()];
 
     for (auto FE : BlockToFactors[B]) {
-      auto PE = &FE->getPExpr();
+      auto PE = FE->getPExpr();
       if (FE->getIsLinked()) {
         auto PHI = (PHINode *)FactorToPHI[FE];
+        if (FE->getWillBeAvail()) continue;
         // If Factor is Linked and Available we need to replace linked PHI
         // instruction with a real calculation.
         if (FE->getIsAvail()) {
-          auto I = PE->getProto()->clone();
+          // If we cannot wait longer put the computation here
+          if (FE->getLater()) {
+            auto I = PE->getProto()->clone();
 
-          auto VE = CreateExpression(*I);
-          VE->setSave(PHI->getNumUses());
-          PExprToInsts[PE].insert(I);
-          VExprToInst[VE] = I;
-          VExprToPExpr[VE] = PE;
-          InstToVExpr[I] = VE;
-          InstrSDFS[I] = InstrSDFS[&B->front()];
-          InstrDFS[I] = InstrDFS[&B->front()];
+            auto VE = CreateExpression(*I);
+            VE->setSave(PHI->getNumUses());
+            PExprToInsts[PE].insert(I);
+            VExprToInst[VE] = I;
+            VExprToPExpr[VE] = PE;
+            InstToVExpr[I] = VE;
+            InstrSDFS[I] = InstrSDFS[&B->front()];
+            InstrDFS[I] = InstrDFS[&B->front()];
 
-          IRBuilder<> Builder(PHI);
-          Builder.Insert(I);
+            IRBuilder<> Builder(PHI);
+            Builder.Insert(I);
 
-          PHI->replaceAllUsesWith(I);
-          KillList.push_back((Instruction *)PHI);
+            PHI->replaceAllUsesWith(I);
 
-          Changed = true;
-          // If it is not WBA and not Available we just need to remove this PHI
-        } else if (!FE->getWillBeAvail()) {
-          assert(PHI->getNumUses() == 0 && "Must not have any uses");
-          KillList.push_back((Instruction *)PHI);
+            Changed = true;
+          }
         }
+        assert(PHI->getNumUses() == 0 && "Must not have any uses");
+        KillList.push_back((Instruction *)PHI);
       } else {
         // Nothing here?
       }
@@ -1426,7 +1436,7 @@ CodeMotion() {
     // to update its Factor expressions
     for (auto S : B->getTerminator()->successors()) {
       for (auto F : BlockToFactors[S]) {
-        auto &VEStack = PExprToVExprStack[&F->getPExpr()];
+        auto &VEStack = PExprToVExprStack[F->getPExpr()];
         size_t PI = F->getPredIndex(B);
         assert(PI != -1UL && "Should not be the case");
         F->setVExpr(PI, VEStack.empty() ? &BExpr : VEStack.top().second);
@@ -1460,7 +1470,7 @@ CodeMotion() {
       if (hasFactors || hasSaved) {
         assert(!hasDeleted && "Must not be the case");
         IRBuilder<> Builder((Instruction *)B->getFirstNonPHI());
-        auto BE = dyn_cast<BasicExpression>(&F->getPExpr());
+        auto BE = dyn_cast<BasicExpression>(F->getPExpr());
         auto PHI = Builder.CreatePHI(BE->getType(), F->getVExprNum());
         for (auto &VE : F->getVExprs()) {
           auto I = VExprToInst[VE];
