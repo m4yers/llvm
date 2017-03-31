@@ -468,7 +468,7 @@ void SSAPRE::
 PrintDebug(const std::string &Caption) {
   dbgs() << "\n" << Caption;
   dbgs() << "--------------------------------------";
-  dbgs() << "\nExpressionsToInts\n";
+  dbgs() << "\nPExprToInts\n";
   for (auto &P : PExprToInsts) {
     dbgs() << "(" << P.getSecond().size() << ") ";
     auto &PE = P.getFirst();
@@ -737,8 +737,10 @@ FactorInsertion() {
 
           // Set already know expression versions
           for (unsigned i = 0, l = PHI->getNumOperands(); i < l; ++i) {
+            auto B = PHI->getIncomingBlock(i);
+            auto J = F->getPredIndex(B);
             auto UVE = ValueToExp[PHI->getOperand(i)];
-            F->setVExpr(i, UVE);
+            F->setVExpr(J, UVE);
           }
 
           BlockToFactors[B].insert({F});
@@ -880,8 +882,8 @@ Rename() {
       // ??? On the other hand shall we compute DownSafe for them?
       // if (FE->getIsLinked()) continue;
       auto PE = FE->getPExpr();
-      PExprToVExprStack[PE].push({FSDFS, FE});
       FE->setVersion(PExprToCounter[PE]++);
+      PExprToVExprStack[PE].push({FSDFS, FE});
     }
 
     // And the rest of the instructions
@@ -944,6 +946,7 @@ Rename() {
         if (OperandsDominate(VE, VEStackTopF)) {
           VE->setVersion(VEStackTop->getVersion());
           Substitutions[VE] = VEStackTop;
+          VEStack.push({SDFS, VE});
         // Otherwise VE's operand(s) is(were) defined in this block and this
         // is indeed a new expression version
         } else {
@@ -976,6 +979,8 @@ Rename() {
         if (SameVersions) {
           VE->setVersion(VEStackTop->getVersion());
           Substitutions[VE] = VEStackTop;
+          // It should be ok to push the same version on the stack
+          VEStack.push({SDFS, VE});
         } else {
           VE->setVersion(PExprToCounter[PE]++);
           VEStack.push({SDFS, VE});
@@ -1020,6 +1025,8 @@ Rename() {
     auto *T = B->getTerminator();
     for (auto S : T->successors()) {
       for (auto F : BlockToFactors[S]) {
+        // Linked Factor's operands are already versioned and set
+        if (F->getIsLinked()) continue;
         auto PE = F->getPExpr();
         auto &VEStack = PExprToVExprStack[PE];
         size_t PI = F->getPredIndex(B);
@@ -1084,7 +1091,15 @@ Rename() {
       if (F->getIsLinked() || LF == F) continue;
       bool Same = true;
       for (unsigned i = 0, l = LF->getVExprNum(); i < l; ++i) {
-        if (LF->getVExpr(i) != F->getVExpr(i)) {
+        auto LFVE = LF->getVExpr(i);
+        auto FVE = F->getVExpr(i);
+        // NOTE
+        // Kinda a special case, while assigning versioned expressions to a Factor
+        // we cannot infer that a variable or a constant is coming from the
+        // predecessor and we assign it to ⊥, but a Linked Factor will know
+        // for sure whether a constant/variable is involved.
+        if (VariableOrConstant(*LFVE) && FVE == &BExpr) continue;
+        if (LFVE != FVE) {
           Same = false;
           break;
         }
