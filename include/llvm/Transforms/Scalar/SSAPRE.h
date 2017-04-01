@@ -365,6 +365,7 @@ private:
 
   // This maps BB to Index inside Versions and HRU
   DenseMap<const BasicBlock *, size_t> Pred;
+  DenseMap<size_t, const BasicBlock *> Indices;
 
   // The Versioned Expressions that this Factor joins
   SmallVector<Expression *, 8> Versions;
@@ -372,10 +373,23 @@ private:
   // If True this Factor is linked to already existing PHI function
   bool Linked;
 
+  // If True this Factor merges init value and calculated value inside a cycle.
+  // These must be treated differently since with all formal predicates
+  // calculated this Factor/PHI will be replaced with the actual computation,
+  // but instead it should be pushed up to the init block. And if it happens
+  // that the Factor is not a Cycle, we still will push calculation to the init
+  // block since any constant/variable is regarded as bottom. This of course
+  // add register pressure
+  //
+  // The second course of actions would be to push the computation directly
+  // to the first use place, but we need to prove that this place is not inside
+  // a cycle, or at least in the same cycle as init.
+  bool Cycle;
+
   // If True expression is Anticipated on every path leading from this Factor
   bool DownSafe;
 
-  // True if an Operand is a Real expressin and not Factor or Expression Operand
+  // True if an Operand is a Real expression and not Factor or Expression Operand
   // definition(⊥)
   SmallVector<bool, 8> HasRealUse;
 
@@ -395,14 +409,19 @@ public:
   void setIsLinked(bool L) { Linked = L; }
   bool getIsLinked() const { return Linked; }
 
+  void setIsCycle(bool C) { Cycle = C; }
+  bool getIsCycle() const { return Cycle; }
+
   void setPExpr(const Expression *E) { PE = E; }
   const Expression* getPExpr() const { return PE; }
 
   void addPred(const BasicBlock *B, size_t I) {
     Pred[B] = I;
+    Indices[I] = B;
     Versions.push_back(nullptr);
     HasRealUse.push_back(false);
   }
+  const BasicBlock * getPred(size_t I) const { return Indices.lookup(I); }
   size_t getPredIndex(const BasicBlock * B) const {
     assert(Pred.count(B) && "Should not be the case");
     return Pred.lookup(B);
@@ -465,6 +484,7 @@ public:
     OS << "BB: ";
     BB.printAsOperand(OS, false);
     OS << ", LNK: " << Linked;
+    OS << ", CYC: " << Cycle;
     OS << ", V: <";
     for (unsigned i = 0, l = Versions.size(); i < l; ++i) {
       if (Versions[i]) {
@@ -601,6 +621,12 @@ private:
 
   // Check whether Expression operands' definitions dominate the Factor
   bool OperandsDominate(Expression *Exp, const FactorExpression *F);
+
+  Expression * GetBottom();
+
+  // Check whether an Expression is a ⊥ value. It can be not only a real bottom
+  // value but a constant or a variable since they do not provide a computation
+  bool IsBottom(const Expression &E);
 
   bool FactorHasRealUse(const FactorExpression *F);
 

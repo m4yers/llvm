@@ -188,6 +188,13 @@ OperandsDominate(Expression *Exp, const FactorExpression *Factor) {
   return true;
 }
 
+Expression * SSAPRE:: GetBottom() { return &BExpr; }
+
+bool SSAPRE::
+IsBottom(const Expression &E) {
+  return &E == GetBottom() || VariableOrConstant(E);
+}
+
 bool SSAPRE::
 FactorHasRealUse(const FactorExpression *F) {
   // If Factor is linked with a PHI we need to check its uses.
@@ -710,6 +717,10 @@ FactorInsertion() {
         bool Same = true;
         for (auto &Use : PHI->operands()) {
           auto UVE = ValueToExp[Use.get()];
+
+          // A variable or a constant regarded as ⊥ value
+          if (VariableOrConstant(*UVE)) continue;
+
           auto UPE = VExprToPExpr[UVE];
 
           // If the first operand, just set PE and continue
@@ -741,6 +752,11 @@ FactorInsertion() {
             auto J = F->getPredIndex(B);
             auto UVE = ValueToExp[PHI->getOperand(i)];
             F->setVExpr(J, UVE);
+
+            // ??? Careful here, this might no be the total case
+            // This must be init value, thus it is a cycle
+            if (VariableOrConstant(*UVE))
+              F->setIsCycle(true);
           }
 
           BlockToFactors[B].insert({F});
@@ -946,7 +962,6 @@ Rename() {
         if (OperandsDominate(VE, VEStackTopF)) {
           VE->setVersion(VEStackTop->getVersion());
           Substitutions[VE] = VEStackTop;
-          VEStack.push({SDFS, VE});
         // Otherwise VE's operand(s) is(were) defined in this block and this
         // is indeed a new expression version
         } else {
@@ -956,10 +971,7 @@ Rename() {
           // STEP 3 Init: DownSafe
           // If the top of the stack contains a Factor expression we clear its
           // DownSafe flag because its result is not used and not anticipated
-          if (VEStackTop && FactorExpression::classof(VEStackTop)) {
-            auto *F = dyn_cast<FactorExpression>(VEStackTop);
-            F->setDownSafe(false);
-          }
+          VEStackTopF->setDownSafe(false);
         }
       // Real occurrence
       } else {
@@ -979,8 +991,6 @@ Rename() {
         if (SameVersions) {
           VE->setVersion(VEStackTop->getVersion());
           Substitutions[VE] = VEStackTop;
-          // It should be ok to push the same version on the stack
-          VEStack.push({SDFS, VE});
         } else {
           VE->setVersion(PExprToCounter[PE]++);
           VEStack.push({SDFS, VE});
@@ -1032,7 +1042,7 @@ Rename() {
         size_t PI = F->getPredIndex(B);
         assert(PI != -1UL && "Should not be the case");
         auto VEStackTop = VEStack.empty() ? nullptr : VEStack.top().second;
-        F->setVExpr(PI, VEStack.empty() ? &BExpr : VEStackTop);
+        F->setVExpr(PI, VEStack.empty() ? GetBottom() : VEStackTop);
 
         // STEP 3 Init: HasRealUse
         bool HasRealUse = false;
@@ -1064,7 +1074,7 @@ Rename() {
     }
 
     // STEP 3 Init: DownSafe
-    // We set Factor's DownSafe safe to False if it is the last Expression's
+    // We set Factor's DownSafe to False if it is the last Expression's
     // occurence before program exit.
     if (T->getNumSuccessors() == 0) {
       for (auto &P : PExprToVExprStack) {
@@ -1098,7 +1108,15 @@ Rename() {
         // we cannot infer that a variable or a constant is coming from the
         // predecessor and we assign it to ⊥, but a Linked Factor will know
         // for sure whether a constant/variable is involved.
-        if (VariableOrConstant(*LFVE) && FVE == &BExpr) continue;
+        if (VariableOrConstant(*LFVE) && FVE == GetBottom()) continue;
+
+        // NOTE
+        // Yet another special case, since we do not add same version on the
+        // stack it is possible to have a Factor as an operand of itself, this
+        // happens for cycles only. We treat such an operand as a bottom and
+        // ignore it.
+        if (FVE == F) continue;
+
         if (LFVE != FVE) {
           Same = false;
           break;
@@ -1155,8 +1173,13 @@ DownSafety() {
 void SSAPRE::
 ComputeCanBeAvail() {
   for (auto F : FExprs) {
-    if (!F->getDownSafe() && F->getCanBeAvail() && F->hasVExpr(BExpr)) {
-      ResetCanBeAvail(*F);
+    for (auto V : F->getVExprs()) {
+      if (IsBottom(*V)) {
+        if (!F->getDownSafe() && F->getCanBeAvail()) {
+          ResetCanBeAvail(*F);
+        }
+        break;
+      }
     }
   }
 }
@@ -1168,7 +1191,7 @@ ResetCanBeAvail(FactorExpression &G) {
     auto I = F->getVExprIndex(G);
     if (I == -1UL) continue;
     if (!F->getHasRealUse(I)) {
-      F->setVExpr(I, &BExpr);
+      F->setVExpr(I, GetBottom());
       if (!F->getDownSafe() && F->getCanBeAvail()) {
         ResetCanBeAvail(*F);
       }
@@ -1184,7 +1207,7 @@ ComputeLater() {
   for (auto F : FExprs) {
     if (F->getLater()) {
       for (size_t i = 0, l = F->getVExprNum(); i < l; ++i) {
-        if (F->getHasRealUse(i) && F->getVExpr(i) != &BExpr) {
+        if (F->getHasRealUse(i) && !IsBottom(*F->getVExpr(i))) {
           ResetLater(*F);
           break;
         }
@@ -1255,7 +1278,7 @@ FinalizeVisit(BasicBlock &B) {
     // If there was no expression occurrence before
     // or it was an expression's operand definition
     // or the previous expression does not strictly dominate the current occurrence
-    if (!ADPE.count(V) || ADPE[V] == &BExpr ||
+    if (!ADPE.count(V) || IsBottom(*ADPE[V]) ||
         !NotStrictlyDominates(ADPE[V], VE)) {
       ADPE[V] = VE;
     // Or it was a Factor that for sure will be materialized, if not alredy
@@ -1280,7 +1303,7 @@ FinalizeVisit(BasicBlock &B) {
         // Satisfies insert if either:
         //   - Version(O) is ⊥
         //   - HRU(O) is False and O is Factor and WBA(O) is False
-        if (O == &BExpr ||
+        if (IsBottom(*O)||
             (!F->getHasRealUse(PI) &&
              FactorExpression::classof(O) &&
              !dyn_cast<FactorExpression>(O)->getWillBeAvail())) {
@@ -1359,28 +1382,37 @@ CodeMotion() {
         auto PHI = (PHINode *)FactorToPHI[FE];
         if (FE->getWillBeAvail()) continue;
         // If Factor is Linked and Available we need to replace linked PHI
-        // instruction with a real calculation.
-        if (FE->getIsAvail()) {
-          // If we cannot wait longer put the computation here
-          if (FE->getLater()) {
-            auto I = PE->getProto()->clone();
+        // instruction with a real calculation since we cannot wait longer delay
+        // the computation, unless it is a cycle
+        if (FE->getIsAvail() && FE->getLater()) {
+          auto I = PE->getProto()->clone();
 
-            auto VE = CreateExpression(*I);
-            VE->setSave(PHI->getNumUses());
-            PExprToInsts[PE].insert(I);
-            VExprToInst[VE] = I;
-            VExprToPExpr[VE] = PE;
-            InstToVExpr[I] = VE;
-            InstrSDFS[I] = InstrSDFS[&B->front()];
-            InstrDFS[I] = InstrDFS[&B->front()];
+          auto VE = CreateExpression(*I);
+          VE->setSave(PHI->getNumUses());
+          PExprToInsts[PE].insert(I);
+          VExprToInst[VE] = I;
+          VExprToPExpr[VE] = PE;
+          InstToVExpr[I] = VE;
+          InstrSDFS[I] = InstrSDFS[&B->front()];
+          InstrDFS[I] = InstrDFS[&B->front()];
 
-            IRBuilder<> Builder(PHI);
-            Builder.Insert(I);
-
-            PHI->replaceAllUsesWith(I);
-
-            Changed = true;
+          // Push computation to the init block
+          if (FE->getIsCycle()) {
+            for (unsigned i = 0, l = FE->getVExprNum(); i < l; ++i) {
+              if (IsBottom(*FE->getVExpr(i))) {
+                auto B = FE->getPred(i);
+                auto T = B->getTerminator();
+                I->insertBefore((Instruction *)T);
+              }
+            }
+          // Or if this is not a cycle leave it here
+          } else {
+            I->insertBefore(PHI);
           }
+
+          PHI->replaceAllUsesWith(I);
+
+          Changed = true;
         }
         assert(PHI->getNumUses() == 0 && "Must not have any uses");
         KillList.push_back((Instruction *)PHI);
@@ -1454,7 +1486,7 @@ CodeMotion() {
         auto &VEStack = PExprToVExprStack[F->getPExpr()];
         size_t PI = F->getPredIndex(B);
         assert(PI != -1UL && "Should not be the case");
-        F->setVExpr(PI, VEStack.empty() ? &BExpr : VEStack.top().second);
+        F->setVExpr(PI, VEStack.empty() ? GetBottom() : VEStack.top().second);
       }
     }
   }
