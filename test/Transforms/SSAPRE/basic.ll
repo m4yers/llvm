@@ -184,3 +184,37 @@ define i64 @basic_3_partial_not_used(i64, i8**) #0 {
   %8 = add nsw i64 %0, 1
   ret i64 0
 }
+
+;           ---------------                        ---------------
+;                                                    %1 = %0 + 1
+;           ---------------                        ---------------
+; .-----------.    |                     .-----------.    |
+; |       -------------------            |       -------------------
+; |          %p = phi(0,%5)         \\   |
+; |       -------------------       //   |       -------------------
+; |          /           \               |          /           \
+; |  -------------   -------------       |  -------------   -------------
+; |   %5 = %0 + 1       ret %p           |                     ret %1
+; |  -------------   -------------       |  -------------   -------------
+; ._______/                              ._______/
+;
+; TODO: We need to prove that the use place is not inside a cycle, or at least
+; inside the same cycle as the init bb.
+;
+; CHECK-LABEL: @cycle_1(
+; CHECK:       add
+; CHECK:       br
+; CHECK:       br
+; CHECK:       br
+; CHECK:       ret
+define i32 @cycle_1(i32, i8**) #0 {
+  br label %3
+
+  %.0 = phi i32 [ 0, %2 ], [ %5, %4 ]
+  br i1 false, label %4, label %6
+
+  %5 = add nsw i32 %0, 1
+  br label %3
+
+  ret i32 %.0
+}
