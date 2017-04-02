@@ -477,7 +477,7 @@ PrintDebug(const std::string &Caption) {
   dbgs() << "--------------------------------------";
   dbgs() << "\nPExprToInts\n";
   for (auto &P : PExprToInsts) {
-    dbgs() << "(" << P.getSecond().size() << ")";
+    dbgs() << "(" << P.getSecond().size() << ")  ";
     auto &PE = P.getFirst();
     PE->printInternal(dbgs());
     for (auto VE : PExprToVExprs[PE]) {
@@ -503,7 +503,7 @@ PrintDebug(const std::string &Caption) {
 
   dbgs() << "\nBlockToFactors\n";
   for (auto &P : BlockToFactors) {
-    dbgs() << "(" << P.getSecond().size() << ")";
+    dbgs() << "(" << P.getSecond().size() << ")  ";
     P.getFirst()->printAsOperand(dbgs(), false);
     dbgs() << ":";
     for (const auto &F : P.getSecond()) {
@@ -515,7 +515,7 @@ PrintDebug(const std::string &Caption) {
 
   dbgs() << "\nBlockToInserts\n";
   for (auto &P : BlockToInserts) {
-    dbgs() << "(" << P.getSecond().size() << ")";
+    dbgs() << "(" << P.getSecond().size() << ")  ";
     P.getFirst()->printAsOperand(dbgs(), false);
     dbgs() << ":";
     for (const auto &I : P.getSecond()) {
@@ -1338,6 +1338,7 @@ FinalizeVisit(BasicBlock &B) {
           VExprToInst[VE] = I;
           VExprToPExpr[VE] = PE;
           InstToVExpr[I] = VE;
+          Substitutions[VE] = VE;
           InstrSDFS[I] = InstrSDFS[B.getTerminator()];
           InstrDFS[I] = InstrDFS[B.getTerminator()];
           F->setVExpr(PI, VE);
@@ -1406,27 +1407,34 @@ CodeMotion() {
         // instruction with a real calculation since we cannot wait longer delay
         // the computation, unless it is a cycle
         if (FE->getIsAvail() && FE->getLater()) {
-          // auto I = PE->getProto()->clone();
-          //
-          // auto VE = CreateExpression(*I);
-          // VE->setSave(PHI->getNumUses());
-          // PExprToInsts[PE].insert(I);
-          // VExprToInst[VE] = I;
-          // VExprToPExpr[VE] = PE;
-          // InstToVExpr[I] = VE;
-          // InstrSDFS[I] = InstrSDFS[&B->front()];
-          // InstrDFS[I] = InstrDFS[&B->front()];
-
-          // FIXME this only works if there are TWO incomming values
-          assert(FE->getVExprNum() == 2 && "Well, shit...");
-          // Push computation to the init block
           Expression * VE;
-          // Find non-cycled expression
-          for (auto V : FE->getVExprs()) {
-            if (V->getVersion() != FE->getVersion()){
-              VE = V;
-              break;
+
+          // If we have a cycled Factor we use one of the branch expression as 
+          // the defining one
+          if (FE->getIsCycle()) {
+            // FIXME this only works if there are TWO incomming values
+            assert(FE->getVExprNum() == 2 && "Well, shit...");
+            // Push computation to the init block
+            // Find non-cycled expression
+            for (auto V : FE->getVExprs()) {
+              if (V->getVersion() != FE->getVersion()){
+                VE = V;
+                break;
+              }
             }
+          // otherwise we create a new one and place it instead of the PHI
+          } else {
+            auto I = PE->getProto()->clone();
+
+            VE = CreateExpression(*I);
+            VE->setSave(PHI->getNumUses());
+            PExprToInsts[PE].insert(I);
+            VExprToInst[VE] = I;
+            VExprToPExpr[VE] = PE;
+            InstToVExpr[I] = VE;
+            InstrSDFS[I] = InstrSDFS[&B->front()];
+            InstrDFS[I] = InstrDFS[&B->front()];
+            I->insertBefore(PHI);
           }
 
           // Now any PHI reference will go to VE
@@ -1481,8 +1489,6 @@ CodeMotion() {
         // Replace usage
         Substitutions[VE] = VEStackTop;
         ReloadList.insert(&I);
-        // auto &RI = VExprToInst[VEStackTop];
-        // I.replaceAllUsesWith(RI);
 
         // Update Factors
         for (auto F : FExprs) {
