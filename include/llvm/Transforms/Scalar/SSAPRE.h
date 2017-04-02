@@ -139,7 +139,7 @@ public:
     OS << ", V: " << Version;
     OS << ", S: " << Saved;
     OS << ", R: " << (Reload ? "T" : "F");
-    OS << ", OPC: " << getOpcode() << ", ";
+    // OS << ", OPC: " << getOpcode() << ", ";
   }
 
   void print(raw_ostream &OS) const {
@@ -178,7 +178,6 @@ public:
 
   void printInternal(raw_ostream &OS) const override {
     this->Expression::printInternal(OS);
-    OS << "I = " << *Inst;
   }
 }; // class IgnoredExpression
 
@@ -299,14 +298,7 @@ public:
 
   void printInternal(raw_ostream &OS) const override {
     this->Expression::printInternal(OS);
-    OS << "OPS: { ";
-    for (unsigned i = 0, e = getNumOperands(); i != e; ++i) {
-      OS << "[" << i << "] = ";
-      Operands[i]->printAsOperand(OS);
-      if (i + 1 != e)
-        OS << ", ";
-    }
-    OS << " }";
+    OS << ", OPS: " << getNumOperands();
   }
 }; // class BasicExpression
 
@@ -350,7 +342,7 @@ public:
 
   void printInternal(raw_ostream &OS) const override {
     this->BasicExpression::printInternal(OS);
-    OS << "BB: ";
+    OS << ", BB: ";
     BB->printAsOperand(dbgs());
   }
 }; // class PHIExpression
@@ -385,7 +377,7 @@ private:
   // to the first use place, but we need to prove that this place is not inside
   // a cycle, or at least in the same cycle as init.
   bool Cycle;
-  
+
   // Contains the predecessor index that creates a local cycle
   bool CycleIndex;
 
@@ -484,8 +476,9 @@ public:
 
   void printInternal(raw_ostream &OS) const override {
     this->Expression::printInternal(OS);
-    OS << "BB: ";
+    OS << ", BB: ";
     BB.printAsOperand(OS, false);
+    OS << ", PE: " << (void *)PE;
     OS << ", LNK: " << Linked;
     OS << ", CYC: " << Cycle;
     OS << ", V: <";
@@ -567,7 +560,7 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
   DenseMap<const Expression *, SmallPtrSet<BasicBlock *, 5>> PExprToBlocks;
 
   // BasicBlock-to-FactorList map
-  DenseMap<const BasicBlock *, SmallPtrSet<FactorExpression *, 5>> BlockToFactors;
+  DenseMap<const BasicBlock *, SmallVector<FactorExpression *, 5>> BlockToFactors;
   DenseMap<const FactorExpression *, const BasicBlock *> FactorToBlock;
 
   // Map PHI to Factor if PHI joins two expressions of the same proto
@@ -584,14 +577,14 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
 
   DenseMap<const Expression *, DenseMap<int, Expression *>> AvailDef;
 
-  DenseMap<const BasicBlock *, SmallPtrSet<Instruction *, 5>> BlockToInserts;
+  DenseMap<const BasicBlock *, SmallVector<Instruction *, 5>> BlockToInserts;
 
   // This map contains 1-to-1 correspondence between Expression Occurrence and
   // its Definition. Upon initialization Keys will be equal to Values, once
   // an Expression assumes existing Version it must define its Definition, so
   // that during kill time we could replace its use with a proper definition.
   DenseMap<Expression *, Expression *> Substitutions;
-  SmallPtrSet<Instruction *, 32> ReloadList;
+  SmallVector<Instruction *, 32> ReloadList;
   SmallVector<Instruction *, 32> KillList;
 
 public:

@@ -372,13 +372,13 @@ CreatePHIExpression(PHINode &I) {
 }
 
 FactorExpression *SSAPRE::
-CreateFactorExpression(const Expression &E, const BasicBlock &B) {
+CreateFactorExpression(const Expression &PE, const BasicBlock &B) {
   auto FE = new FactorExpression(B);
   size_t C = 0;
   for (auto S = pred_begin(&B), EE = pred_end(&B); S != EE; ++S) {
     FE->addPred(*S, C++);
   }
-  FE->setPExpr(&E);
+  FE->setPExpr(&PE);
 
   return FE;
 }
@@ -473,37 +473,40 @@ IgnoreExpression(const Expression &E) {
 
 void SSAPRE::
 PrintDebug(const std::string &Caption) {
-  dbgs() << "\n" << Caption;
-  dbgs() << "--------------------------------------";
-  dbgs() << "\nPExprToInts\n";
-  for (auto &P : PExprToInsts) {
-    dbgs() << "(" << P.getSecond().size() << ")  ";
-    auto &PE = P.getFirst();
-    PE->printInternal(dbgs());
-    for (auto VE : PExprToVExprs[PE]) {
-      dbgs() << "\n\t";
-      if (VE->getSave() || VE->getReload())
-        VE->printInternal(dbgs());
-      else
-        dbgs() << "(deleted)";
-    }
-    dbgs() << "\n";
-  }
+  dbgs() << "---------------------------------------------";
+  dbgs() << Caption << "\n";
 
-  dbgs() << "\nORDERS DFS/SDFS";
+  dbgs() << "\nInstructions";
+  dbgs() << "\n(dfs) (instruction)";
+  dbgs() << "\n---------------------------";
   for (auto &V : DFSToInstr) {
     auto I = dyn_cast<Instruction>(V);
     dbgs() << "\n" << InstrDFS[I];
-    dbgs() << "\t" << InstrSDFS[I];
     if (ValueToExp[I]->getSave() && I->getParent())
       dbgs() << "\t" << *I;
     else
       dbgs() << "\t(deleted)";
   }
 
+  dbgs() << "\n\nExpressions";
+  dbgs() << "\n(s/d) (dfs) (expression)";
+  dbgs() << "\n---------------------------\n";
+  for (auto &P : PExprToInsts) {
+    auto &PE = P.getFirst();
+    dbgs() << ExpressionTypeToString(PE->getExpressionType());
+    for (auto VE : PExprToVExprs[PE]) {
+      auto I = VExprToInst[VE];
+      dbgs() << "\n\t";
+      dbgs() << (VE->getSave() || VE->getReload() ? "(s)" : "(d)");
+      dbgs() << " (" << InstrDFS[I]<< ") ";
+      VE->printInternal(dbgs());
+    }
+    dbgs() << "\n";
+  }
+
   dbgs() << "\nBlockToFactors\n";
   for (auto &P : BlockToFactors) {
-    dbgs() << "(" << P.getSecond().size() << ")  ";
+    dbgs() << "(" << P.getSecond().size() << ") ";
     P.getFirst()->printAsOperand(dbgs(), false);
     dbgs() << ":";
     for (const auto &F : P.getSecond()) {
@@ -515,7 +518,7 @@ PrintDebug(const std::string &Caption) {
 
   dbgs() << "\nBlockToInserts\n";
   for (auto &P : BlockToInserts) {
-    dbgs() << "(" << P.getSecond().size() << ")  ";
+    dbgs() << "(" << P.getSecond().size() << ") ";
     P.getFirst()->printAsOperand(dbgs(), false);
     dbgs() << ":";
     for (const auto &I : P.getSecond()) {
@@ -752,14 +755,9 @@ FactorInsertion() {
             auto J = F->getPredIndex(B);
             auto UVE = ValueToExp[PHI->getOperand(i)];
             F->setVExpr(J, UVE);
-
-            // ??? Careful here, this might no be the total case
-            // // This must be init value, thus it is a cycle
-            // if (VariableOrConstant(*UVE))
-            //   F->setIsCycle(true);
           }
 
-          BlockToFactors[B].insert({F});
+          BlockToFactors[B].push_back({F});
           FactorToBlock[F] = B;
           Substitutions[F] = F;
           FExprs.insert(F);
@@ -823,7 +821,7 @@ FactorInsertion() {
 
       if (!FactorExists) {
         auto F = CreateFactorExpression(*PE, *B);
-        BlockToFactors[B].insert({F});
+        BlockToFactors[B].push_back({F});
         FactorToBlock[F] = B;
         Substitutions[F] = F;
         FExprs.insert(F);
@@ -1144,8 +1142,12 @@ Rename() {
       P->dropAllReferences();
     }
     FExprs.erase(F);
-    auto B = FactorToBlock[F];
-    BlockToFactors[B].erase(F);
+    auto &B = FactorToBlock[F];
+    auto &V = BlockToFactors[B];
+    for (auto VS = V.begin(), VV = V.end(); VS != VV; ++VS) {
+      if (*VS == F)
+        V.erase(VS);
+    }
     FactorToBlock.erase(F);
   }
 
@@ -1346,7 +1348,7 @@ FinalizeVisit(BasicBlock &B) {
           if (!BlockToInserts.count(&B)) {
             BlockToInserts.insert({&B, {I}});
           } else {
-            BlockToInserts[&B].insert(I);
+            BlockToInserts[&B].push_back(I);
           }
         } else {
           auto V = O->getVersion();
@@ -1402,14 +1404,15 @@ CodeMotion() {
       auto PE = FE->getPExpr();
       if (FE->getIsLinked()) {
         auto PHI = (PHINode *)FactorToPHI[FE];
-        if (FE->getWillBeAvail()) continue;
+        // if (FE->getWillBeAvail()) continue;
         // If Factor is Linked and Available we need to replace linked PHI
         // instruction with a real calculation since we cannot wait longer delay
         // the computation, unless it is a cycle
-        if (FE->getIsAvail() && FE->getLater()) {
+        // if (FE->getIsAvail() && FE->getLater()) {
+        if (true) {
           Expression * VE;
 
-          // If we have a cycled Factor we use one of the branch expression as 
+          // If we have a cycled Factor we use one of the branch expression as
           // the defining one
           if (FE->getIsCycle()) {
             // FIXME this only works if there are TWO incomming values
@@ -1488,7 +1491,7 @@ CodeMotion() {
 
         // Replace usage
         Substitutions[VE] = VEStackTop;
-        ReloadList.insert(&I);
+        ReloadList.push_back(&I);
 
         // Update Factors
         for (auto F : FExprs) {
@@ -1549,6 +1552,8 @@ CodeMotion() {
         auto BE = dyn_cast<BasicExpression>(F->getPExpr());
         auto PHI = Builder.CreatePHI(BE->getType(), F->getVExprNum());
         for (auto &VE : F->getVExprs()) {
+          while (VE != Substitutions[VE])
+            VE = Substitutions[VE];
           auto I = VExprToInst[VE];
           PHI->addIncoming(I, I->getParent());
         }
