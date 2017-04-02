@@ -477,7 +477,7 @@ PrintDebug(const std::string &Caption) {
   dbgs() << "--------------------------------------";
   dbgs() << "\nPExprToInts\n";
   for (auto &P : PExprToInsts) {
-    dbgs() << "(" << P.getSecond().size() << ") ";
+    dbgs() << "(" << P.getSecond().size() << ")";
     auto &PE = P.getFirst();
     PE->printInternal(dbgs());
     for (auto VE : PExprToVExprs[PE]) {
@@ -503,7 +503,7 @@ PrintDebug(const std::string &Caption) {
 
   dbgs() << "\nBlockToFactors\n";
   for (auto &P : BlockToFactors) {
-    dbgs() << "(" << P.getSecond().size() << ") ";
+    dbgs() << "(" << P.getSecond().size() << ")";
     P.getFirst()->printAsOperand(dbgs(), false);
     dbgs() << ":";
     for (const auto &F : P.getSecond()) {
@@ -515,7 +515,7 @@ PrintDebug(const std::string &Caption) {
 
   dbgs() << "\nBlockToInserts\n";
   for (auto &P : BlockToInserts) {
-    dbgs() << "(" << P.getSecond().size() << ") ";
+    dbgs() << "(" << P.getSecond().size() << ")";
     P.getFirst()->printAsOperand(dbgs(), false);
     dbgs() << ":";
     for (const auto &I : P.getSecond()) {
@@ -754,9 +754,9 @@ FactorInsertion() {
             F->setVExpr(J, UVE);
 
             // ??? Careful here, this might no be the total case
-            // This must be init value, thus it is a cycle
-            if (VariableOrConstant(*UVE))
-              F->setIsCycle(true);
+            // // This must be init value, thus it is a cycle
+            // if (VariableOrConstant(*UVE))
+            //   F->setIsCycle(true);
           }
 
           BlockToFactors[B].insert({F});
@@ -894,9 +894,17 @@ Rename() {
 
     // Then Factors
     for (auto FE : BlockToFactors[B]) {
-      // Linked Factors are ignored, since they just ride along till Finalize
-      // ??? On the other hand shall we compute DownSafe for them?
-      // if (FE->getIsLinked()) continue;
+      // We want to process LFactors specifically after the normal ones so the
+      // expressions will assume their versions
+      if (FE->getIsLinked()) continue;
+      auto PE = FE->getPExpr();
+      FE->setVersion(PExprToCounter[PE]++);
+      PExprToVExprStack[PE].push({FSDFS, FE});
+    }
+
+    // Then LFactors
+    for (auto FE : BlockToFactors[B]) {
+      if (!FE->getIsLinked()) continue;
       auto PE = FE->getPExpr();
       FE->setVersion(PExprToCounter[PE]++);
       PExprToVExprStack[PE].push({FSDFS, FE});
@@ -1042,7 +1050,9 @@ Rename() {
         size_t PI = F->getPredIndex(B);
         assert(PI != -1UL && "Should not be the case");
         auto VEStackTop = VEStack.empty() ? nullptr : VEStack.top().second;
-        F->setVExpr(PI, VEStack.empty() ? GetBottom() : VEStackTop);
+        auto VE = VEStack.empty() ? GetBottom() : VEStackTop;
+
+        F->setVExpr(PI, VE);
 
         // STEP 3 Init: HasRealUse
         bool HasRealUse = false;
@@ -1115,7 +1125,7 @@ Rename() {
         // stack it is possible to have a Factor as an operand of itself, this
         // happens for cycles only. We treat such an operand as a bottom and
         // ignore it.
-        if (FVE == F) continue;
+        if (FVE == LF || FVE == F) continue;
 
         if (LFVE != FVE) {
           Same = false;
@@ -1137,6 +1147,16 @@ Rename() {
     auto B = FactorToBlock[F];
     BlockToFactors[B].erase(F);
     FactorToBlock.erase(F);
+  }
+
+  // Determine cyclic Factors of whats left
+  for (auto F : FExprs) {
+    for (auto VE : F->getVExprs()) {
+      // This happens if the Factor is contained inside a cycle and the is
+      // not change in the expression's operands along this cycle
+      if (F->getVersion() == VE->getVersion())
+        F->setIsCycle(true);
+    }
   }
 }
 
@@ -1296,7 +1316,8 @@ FinalizeVisit(BasicBlock &B) {
 
   for (auto S : B.getTerminator()->successors()) {
     for (auto F : BlockToFactors[S]) {
-      if (F->getWillBeAvail()) {
+      // ??? Not sure whether Avail ought go through here
+      if (F->getWillBeAvail() || F->getIsAvail()) {
         auto PE = F->getPExpr();
         auto PI = F->getPredIndex(&B);
         auto O = F->getVExpr(PI);
@@ -1385,32 +1406,34 @@ CodeMotion() {
         // instruction with a real calculation since we cannot wait longer delay
         // the computation, unless it is a cycle
         if (FE->getIsAvail() && FE->getLater()) {
-          auto I = PE->getProto()->clone();
+          // auto I = PE->getProto()->clone();
+          //
+          // auto VE = CreateExpression(*I);
+          // VE->setSave(PHI->getNumUses());
+          // PExprToInsts[PE].insert(I);
+          // VExprToInst[VE] = I;
+          // VExprToPExpr[VE] = PE;
+          // InstToVExpr[I] = VE;
+          // InstrSDFS[I] = InstrSDFS[&B->front()];
+          // InstrDFS[I] = InstrDFS[&B->front()];
 
-          auto VE = CreateExpression(*I);
-          VE->setSave(PHI->getNumUses());
-          PExprToInsts[PE].insert(I);
-          VExprToInst[VE] = I;
-          VExprToPExpr[VE] = PE;
-          InstToVExpr[I] = VE;
-          InstrSDFS[I] = InstrSDFS[&B->front()];
-          InstrDFS[I] = InstrDFS[&B->front()];
-
+          // FIXME this only works if there are TWO incomming values
+          assert(FE->getVExprNum() == 2 && "Well, shit...");
           // Push computation to the init block
-          if (FE->getIsCycle()) {
-            for (unsigned i = 0, l = FE->getVExprNum(); i < l; ++i) {
-              if (IsBottom(*FE->getVExpr(i))) {
-                auto B = FE->getPred(i);
-                auto T = B->getTerminator();
-                I->insertBefore((Instruction *)T);
-              }
+          Expression * VE;
+          // Find non-cycled expression
+          for (auto V : FE->getVExprs()) {
+            if (V->getVersion() != FE->getVersion()){
+              VE = V;
+              break;
             }
-          // Or if this is not a cycle leave it here
-          } else {
-            I->insertBefore(PHI);
           }
 
-          PHI->replaceAllUsesWith(I);
+          // Now any PHI reference will go to VE
+          Substitutions[FE] = VE;
+
+          VE->addSave(PHI->getNumUses());
+          PHI->replaceAllUsesWith(VExprToInst[VE]);
 
           Changed = true;
         }

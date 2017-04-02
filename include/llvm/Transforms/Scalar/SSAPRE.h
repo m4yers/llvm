@@ -385,6 +385,9 @@ private:
   // to the first use place, but we need to prove that this place is not inside
   // a cycle, or at least in the same cycle as init.
   bool Cycle;
+  
+  // Contains the predecessor index that creates a local cycle
+  bool CycleIndex;
 
   // If True expression is Anticipated on every path leading from this Factor
   bool DownSafe;
