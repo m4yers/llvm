@@ -78,8 +78,9 @@ private:
   bool Reload;
 
 public:
-  Expression(ExpressionType ET = ET_Base, unsigned O = ~2U, bool S = true)
-      : EType(ET), Opcode(O), Version(-1),
+  Expression(ExpressionType ET = ET_Base, unsigned O = ~2U,
+             int V = -1000)
+      : EType(ET), Opcode(O), Version(V),
         Proto(nullptr),
         Saved(0), Reload(false) {}
   // Expression(const Expression &) = delete;
@@ -517,6 +518,10 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
   DominatorTree *DT;
   ReversePostOrderTraversal<Function *> *RPOT;
 
+  typedef std::pair<unsigned, Expression *> UIntExpressionPair_t;
+  typedef std::stack<UIntExpressionPair_t> ExprStack_t;
+  typedef DenseMap<const Expression *, ExprStack_t> PExprToVExprStack_t;
+
   SmallPtrSet<const BasicBlock *, 32> JoinBlocks;
 
   // Values' stuff
@@ -557,7 +562,8 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
   // ProtoExpression-to-VersionedExpressions
   DenseMap<const Expression *, SmallPtrSet<Expression *, 5>> PExprToVExprs;
 
-  DenseMap<const Expression *, DenseMap<unsigned, SmallPtrSet<Expression *, 5>>> PExprToVersions;
+  typedef SmallVector<Expression *, 32> ExprVector_t;
+  DenseMap<const Expression *, DenseMap<unsigned, ExprVector_t>> PExprToVersions;
 
   // ProtoExpression-to-BasicBlock map
   DenseMap<const Expression *, SmallPtrSet<BasicBlock *, 5>> PExprToBlocks;
@@ -616,7 +622,8 @@ private:
   bool NotStrictlyDominates(const Expression *Def, const Expression *Use);
 
   // Check whether Expression operands' definitions dominate the Factor
-  bool OperandsDominate(Expression *Exp, const FactorExpression *F);
+  bool OperandsDominate(const PExprToVExprStack_t &, const Expression *E,
+                        const FactorExpression *F);
 
   Expression * GetBottom();
 

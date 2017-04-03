@@ -69,7 +69,7 @@ FactorExpression::~FactorExpression() = default;
 //===----------------------------------------------------------------------===//
 
 // This is used as ⊥ version
-Expression BExpr(ET_Buttom, ~2U, false);
+Expression BExpr(ET_Buttom, ~2U, -2000);
 
 std::pair<unsigned, unsigned> SSAPRE::
 AssignDFSNumbers(BasicBlock *B, unsigned Start,
@@ -158,6 +158,7 @@ VariableOrConstant(const Expression &E) {
 bool SSAPRE::
 NotStrictlyDominates(const Expression *Def, const Expression *Use) {
   assert (Def && Use && "Def or Use is null");
+
   // If the expression is a Factor we need to use the first non-phi instruction
   // of the block it belongs to
   auto IDef = FactorExpression::classof(Def)
@@ -177,11 +178,23 @@ NotStrictlyDominates(const Expression *Def, const Expression *Use) {
   return DT->dominates(IDef, IUse);
 }
 
+// TODO remove Stacks if not used
 bool SSAPRE::
-OperandsDominate(Expression *Exp, const FactorExpression *Factor) {
+OperandsDominate(const PExprToVExprStack_t &S, const Expression *Exp,
+                 const FactorExpression *Factor) {
+
   for (auto &O : VExprToInst[Exp]->operands()) {
     auto E = ValueToExp[O];
+
+    // Variables or Constants occurs indefinitely before any expression
     if (VariableOrConstant(*E)) continue;
+
+    // We want to use the earliest occurrence of the operand, it will be either
+    // a Factor, another definition or the same definition if it defines a new
+    // version.
+    while (E != Substitutions[E])
+      E = Substitutions[E];
+
     if (!NotStrictlyDominates(E, Factor))
       return false;
   }
@@ -205,6 +218,8 @@ FactorHasRealUse(const FactorExpression *F) {
   }
 
   bool HasRealUse = false;
+  // We check every Expression of the same version as the Factor we check, since
+  // by definition those will come after the Factor
   auto &Versions = PExprToVersions[F->getPExpr()];
   for (auto V : Versions[F->getVersion()]) {
     if (!FactorExpression::classof(V)
@@ -275,6 +290,17 @@ ReplaceMatFactorWExpression(FactorExpression * FE, Expression * VE) {
 
   KillFactor(FE);
   KillList.push_back(PHI);
+
+  // Any Expression of the same type and version follows this Factor occurrence
+  // by definition, since we replace the factor with another expression we can
+  // remove all other expressions of the same version and replace their usage
+  // with the this new expression
+  auto &Versions = PExprToVersions[PE][FE->getVersion()];
+  for (auto V : Versions) {
+    auto I = VExprToInst[V];
+    VE->addSave(I->getNumUses());
+    KillList.push_back(I);
+  }
 }
 
 void SSAPRE::
@@ -293,6 +319,18 @@ ReplaceFactorWExpression(FactorExpression * FE, Expression * VE) {
   }
 
   KillFactor(FE);
+
+  // Any Expression of the same type and version follows this Factor occurrence
+  // by definition, since we replace the factor with another expression we can
+  // remove all other expressions of the same version and replace their usage
+  // with the this new expression
+  auto PE = VExprToPExpr[VE];
+  auto &Versions = PExprToVersions[PE][FE->getVersion()];
+  for (auto V : Versions) {
+    auto I = VExprToInst[V];
+    VE->addSave(I->getNumUses());
+    KillList.push_back(I);
+  }
 }
 
 Expression *SSAPRE::
@@ -583,7 +621,8 @@ PrintDebug(const std::string &Caption) {
     dbgs() << "\n";
   }
 
-  dbgs() << "\nBlockToFactors\n";
+  dbgs() << "\nBlockToFactors";
+  dbgs() << "\n---------------------------\n";
   for (auto &P : BlockToFactors) {
     dbgs() << "(" << P.getSecond().size() << ") ";
     P.getFirst()->printAsOperand(dbgs(), false);
@@ -595,7 +634,8 @@ PrintDebug(const std::string &Caption) {
     dbgs() << "\n";
   }
 
-  dbgs() << "\nBlockToInserts\n";
+  dbgs() << "\nBlockToInserts";
+  dbgs() << "\n---------------------------\n";
   for (auto &P : BlockToInserts) {
     dbgs() << "(" << P.getSecond().size() << ") ";
     P.getFirst()->printAsOperand(dbgs(), false);
@@ -608,7 +648,18 @@ PrintDebug(const std::string &Caption) {
     dbgs() << "\n";
   }
 
-  dbgs() << "---------------------------------------------\n";
+  dbgs() << "\nKillList";
+  dbgs() << "\n---------------------------";
+  for (auto &K : KillList) {
+    if (K->getParent()) {
+      dbgs() << "\n";
+      K->printAsOperand(dbgs());
+    } else {
+      dbgs() << "\n(removed)";
+    }
+  }
+
+  dbgs() << "\n---------------------------------------------\n";
 }
 
 void SSAPRE::
@@ -665,8 +716,7 @@ Init(Function &F) {
       Substitutions[VE] = VE;
 
       if (!PExprToVersions.count(PE)) {
-        PExprToVersions.insert({PE,
-            DenseMap<unsigned,SmallPtrSet<Expression *, 5>>()});
+        PExprToVersions.insert({PE, DenseMap<unsigned,ExprVector_t>()});
       }
 
       if (!PExprToVExprs.count(PE)) {
@@ -943,8 +993,7 @@ Rename() {
   // Each PExpr is mapped to a stack of VExpr that grow and shrink during DFS
   // walk. Tops of these stacks are used to name a recent expression occurrence
   // as a Factor operand.
-  DenseMap<const Expression *, std::stack<std::pair<unsigned, Expression *>>>
-    PExprToVExprStack;
+  PExprToVExprStack_t PExprToVExprStack;
 
   for (auto &P : PExprToInsts) {
     auto &PE = P.getFirst();
@@ -962,8 +1011,7 @@ Rename() {
     // Set PHI versions first, since factors regarded as occurring at the end
     // of the predecessor blocks
     for (auto &I : *B) {
-      if (&I == B->getFirstNonPHI())
-        break;
+      if (&I == B->getFirstNonPHI()) break;
       auto &VE = InstToVExpr[&I];
       auto &PE = VExprToPExpr[VE];
       VE->setVersion(PExprToCounter[PE]++);
@@ -990,8 +1038,7 @@ Rename() {
     // And the rest of the instructions
     for (auto &I : *B) {
       // Skip already passed PHIs
-      if (&I != B->getFirstNonPHI())
-        continue;
+      if (PHINode::classof(&I)) continue;
 
       auto &VE = InstToVExpr[&I];
       auto &PE = VExprToPExpr[VE];
@@ -1044,7 +1091,7 @@ Rename() {
       } else if (VEStackTopF) {
         // If every operands' definition dominates this Factor we are dealing
         // with the same expression and assign Factor's version
-        if (OperandsDominate(VE, VEStackTopF)) {
+        if (OperandsDominate(PExprToVExprStack, VE, VEStackTopF)) {
           VE->setVersion(VEStackTop->getVersion());
           Substitutions[VE] = VEStackTop;
         // Otherwise VE's operand(s) is(were) defined in this block and this
@@ -1082,7 +1129,7 @@ Rename() {
         }
       }
 
-      PExprToVersions[PE][VE->getVersion()].insert(VE);
+      PExprToVersions[PE][VE->getVersion()].push_back(VE);
 
       // if (VEStackTop) {
       //   // TODO Here we campare VEStackTop used operands' versions against
@@ -1276,7 +1323,7 @@ ComputeCanBeAvail() {
   for (auto F : FExprs) {
     for (auto V : F->getVExprs()) {
       if (IsBottom(*V)) {
-        if (!F->getDownSafe() && F->getCanBeAvail()) {
+        if (!F->getDownSafe() && F->getCanBeAvail() && !F->getIsCycle()) {
           ResetCanBeAvail(*F);
         }
         break;
@@ -1723,7 +1770,9 @@ CodeMotion() {
 
   // Remove instructions completely
   while (!KillList.empty()) {
-    KillList.pop_back_val()->eraseFromParent();
+    auto K = KillList.pop_back_val();
+    if (!K->getParent()) continue;
+    K->eraseFromParent();
     Changed = true;
   }
 
