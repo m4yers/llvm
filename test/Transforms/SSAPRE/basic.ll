@@ -247,3 +247,43 @@ define i32 @cycle_2(i32, i8**) #0 {
 
   ret i32 %.0
 }
+
+;           ---------------                      -------------------
+;             %1 = %0 + 1                         %1 = %0 + 1
+;           ---------------                       %ptr = inttoptr %p
+;                  |                             -------------------
+; .-------------.  |                     .-------------.  |
+; |       -------------------            |       -------------------
+; |        %p = phi(%1,%2)               |        %val = load %ptr
+; |        %ptr = inttoptr %p            |       -------------------
+; |        %val = load %ptr              |            /       \
+; |       -------------------            |           /         \
+; |          /           \               |          /           \
+; |  -------------   -------------       |  -------------   -------------
+; |   %2 = %0 + 1       ret %p           |                     ret %1
+; |  -------------   -------------       |  -------------   -------------
+; ._______/                              ._______/
+;
+; CHECK-LABEL: @cycle_3(
+; CHECK:       add
+; CHECK:       inttoptr
+; CHECK:       br
+; CHECK-NOT:   phi
+; CHECK:       load
+; CHECK:       br
+; CHECK:       br
+; CHECK:       ret
+define i64 @cycle_3(i64, i8**) #0 {
+  %3 = add nsw i64 %0, 1
+  br label %4
+
+  %p = phi i64 [ %3, %2 ], [ %6, %5 ]
+  %ptr = inttoptr i64 %p to i64*
+  %val = load i64, i64* %ptr
+  br i1 false, label %5, label %7
+
+  %6 = add nsw i64 %0, 1
+  br label %4
+
+  ret i64 %p
+}

@@ -1419,6 +1419,8 @@ FinalizeVisit(BasicBlock &B) {
           VExprToInst[VE] = I;
           VExprToPExpr[VE] = PE;
           InstToVExpr[I] = VE;
+          ExpToValue[VE] = I;
+          ValueToExp[I] = VE;
           Substitutions[VE] = VE;
           InstrSDFS[I] = InstrSDFS[B.getTerminator()];
           InstrDFS[I] = InstrDFS[B.getTerminator()];
@@ -1508,6 +1510,9 @@ CodeMotion() {
           auto I = PE->getProto()->clone();
 
           VE = CreateExpression(*I);
+          ExpToValue[VE] = I;
+          ValueToExp[I] = VE;
+          Substitutions[VE] = VE;
           PExprToInsts[PE].insert(I);
           VExprToInst[VE] = I;
           VExprToPExpr[VE] = PE;
@@ -1519,7 +1524,7 @@ CodeMotion() {
         }
 
         if (FE->getIsMaterialized()) {
-          ReplaceMatFactorWExpression(FE, GetSubstitution(VE));
+          ReplaceMatFactorWExpression(FE, VE);
         } else {
           ReplaceFactorWExpression(FE, VE);
         }
@@ -1527,22 +1532,25 @@ CodeMotion() {
         // If Mat and Later this Factor is useless and we replace it with a real
         // computation
         if (FE->getIsMaterialized() && FE->getLater()) {
-            auto PHI = (PHINode *)FactorToPHI[FE];
-            auto I = PE->getProto()->clone();
+          auto PHI = (PHINode *)FactorToPHI[FE];
+          auto I = PE->getProto()->clone();
 
-            auto VE = CreateExpression(*I);
-            PExprToInsts[PE].insert(I);
-            VExprToInst[VE] = I;
-            VExprToPExpr[VE] = PE;
-            InstToVExpr[I] = VE;
+          auto VE = CreateExpression(*I);
+          Substitutions[VE] = VE;
+          ExpToValue[VE] = I;
+          ValueToExp[I] = VE;
+          PExprToInsts[PE].insert(I);
+          VExprToInst[VE] = I;
+          VExprToPExpr[VE] = PE;
+          InstToVExpr[I] = VE;
 
-            InstrSDFS[I] = InstrSDFS[&B->back()];
-            InstrDFS[I] = InstrDFS[&B->back()];
-            I->insertBefore(PHI);
+          InstrSDFS[I] = InstrSDFS[&B->back()];
+          InstrDFS[I] = InstrDFS[&B->back()];
+          I->insertBefore(PHI);
 
-            ReplaceMatFactorWExpression(FE, VE);
+          ReplaceMatFactorWExpression(FE, VE);
 
-        // Otherwise we leave it be
+          // Otherwise we leave it be
         } else {
           PExprToVExprStack[PE].push({FSDFS, FE});
         }
