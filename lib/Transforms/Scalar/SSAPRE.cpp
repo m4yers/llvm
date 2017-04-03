@@ -216,6 +216,85 @@ FactorHasRealUse(const FactorExpression *F) {
   return HasRealUse;
 }
 
+void SSAPRE::
+KillFactor(FactorExpression * F) {
+  FExprs.erase(F);
+  auto &B = FactorToBlock[F];
+  auto &V = BlockToFactors[B];
+  for (auto VS = V.begin(), VV = V.end(); VS != VV; ++VS) {
+    if (*VS == F)
+      V.erase(VS);
+  }
+  FactorToBlock.erase(F);
+}
+
+Expression * SSAPRE::
+GetSubstitution(Expression * E) {
+  while (E != Substitutions[E])
+    E = Substitutions[E];
+  return E;
+}
+
+Value * SSAPRE::
+GetValue(Expression *E) {
+  return (Value *)ExpToValue[GetSubstitution(E)];
+}
+
+void SSAPRE::
+ReplaceMatFactorWExpression(FactorExpression * FE, Expression * VE) {
+  auto PE = VExprToPExpr[VE];
+  auto PHI = (PHINode *)FactorToPHI[FE];
+
+  // Replace all PHI uses
+  VE = GetSubstitution(VE);
+  VE->addSave(PHI->getNumUses());
+  auto V = GetValue(VE);
+  PHI->replaceAllUsesWith(V);
+  for (auto E : PExprToVExprs[PE]) {
+    if (auto BE = dyn_cast<BasicExpression>(E)) {
+      for (unsigned i = 0, l = BE->getNumOperands(); i < l; ++i) {
+        if (BE->getOperand(i) == PHI) {
+          BE->setOperand(i, V);
+        }
+      }
+    }
+  }
+
+  // Replace all Factor uses
+  for (auto F : FExprs) {
+    for (unsigned i = 0, l = F->getVExprNum(); i < l; ++i) {
+      if (F->getVExpr(i) == FE) {
+        F->setVExpr(i, VE);
+        // Add a save for yet not materialized Factor
+        if (!F->getIsMaterialized() && F->getSave()) {
+          VE->addSave();
+        }
+      }
+    }
+  }
+
+  KillFactor(FE);
+  KillList.push_back(PHI);
+}
+
+void SSAPRE::
+ReplaceFactorWExpression(FactorExpression * FE, Expression * VE) {
+  // Replace all PHI uses
+  VE = GetSubstitution(VE);
+
+  // Replace all Factor uses
+  for (auto F : FExprs) {
+    for (unsigned i = 0, l = F->getVExprNum(); i < l; ++i) {
+      if (F->getVExpr(i) == FE) {
+        F->setVExpr(i, VE);
+        VE->addSave();
+      }
+    }
+  }
+
+  KillFactor(FE);
+}
+
 Expression *SSAPRE::
 CheckSimplificationResults(Expression *E, Instruction &I, Value *V) {
   if (!V)
@@ -482,14 +561,14 @@ PrintDebug(const std::string &Caption) {
   for (auto &V : DFSToInstr) {
     auto I = dyn_cast<Instruction>(V);
     dbgs() << "\n" << InstrDFS[I];
-    if (ValueToExp[I]->getSave() && I->getParent())
+    if (I->getParent())
       dbgs() << "\t" << *I;
     else
       dbgs() << "\t(deleted)";
   }
 
   dbgs() << "\n\nExpressions";
-  dbgs() << "\n(s/d) (dfs) (expression)";
+  dbgs() << "\n(l/d) (dfs) (expression)";
   dbgs() << "\n---------------------------\n";
   for (auto &P : PExprToInsts) {
     auto &PE = P.getFirst();
@@ -497,7 +576,7 @@ PrintDebug(const std::string &Caption) {
     for (auto VE : PExprToVExprs[PE]) {
       auto I = VExprToInst[VE];
       dbgs() << "\n\t";
-      dbgs() << (VE->getSave() || VE->getReload() ? "(s)" : "(d)");
+      dbgs() << (I->getParent() ? "(l)" : "(d)");
       dbgs() << " (" << InstrDFS[I]<< ") ";
       VE->printInternal(dbgs());
     }
@@ -744,7 +823,7 @@ FactorInsertion() {
         if (Same) {
           auto F = CreateFactorExpression(*PE, *B);
 
-          F->setIsLinked(true);
+          F->setIsMaterialized(true);
           F->setPExpr(PE);
           FactorToPHI[F] = PHI;
           PHIToFactor[PHI] = F;
@@ -813,7 +892,7 @@ FactorInsertion() {
       bool FactorExists = false;
       // FIXME remove the cycle
       for (auto F : BlockToFactors[B]) {
-        if (!F->getIsLinked() && F->getPExpr() == PE) {
+        if (!F->getIsMaterialized() && F->getPExpr() == PE) {
           FactorExists = true;
           break;
         }
@@ -894,7 +973,7 @@ Rename() {
     for (auto FE : BlockToFactors[B]) {
       // We want to process LFactors specifically after the normal ones so the
       // expressions will assume their versions
-      if (FE->getIsLinked()) continue;
+      if (FE->getIsMaterialized()) continue;
       auto PE = FE->getPExpr();
       FE->setVersion(PExprToCounter[PE]++);
       PExprToVExprStack[PE].push({FSDFS, FE});
@@ -902,7 +981,7 @@ Rename() {
 
     // Then LFactors
     for (auto FE : BlockToFactors[B]) {
-      if (!FE->getIsLinked()) continue;
+      if (!FE->getIsMaterialized()) continue;
       auto PE = FE->getPExpr();
       FE->setVersion(PExprToCounter[PE]++);
       PExprToVExprStack[PE].push({FSDFS, FE});
@@ -1042,7 +1121,7 @@ Rename() {
     for (auto S : T->successors()) {
       for (auto F : BlockToFactors[S]) {
         // Linked Factor's operands are already versioned and set
-        if (F->getIsLinked()) continue;
+        if (F->getIsMaterialized()) continue;
         auto PE = F->getPExpr();
         auto &VEStack = PExprToVExprStack[PE];
         size_t PI = F->getPredIndex(B);
@@ -1106,7 +1185,7 @@ Rename() {
   for (auto P : FactorToPHI) {
     auto LF = (FactorExpression *)P.getFirst();
     for (auto F : FExprs) {
-      if (F->getIsLinked() || LF == F) continue;
+      if (F->getIsMaterialized() || LF == F) continue;
       bool Same = true;
       for (unsigned i = 0, l = LF->getVExprNum(); i < l; ++i) {
         auto LFVE = LF->getVExpr(i);
@@ -1402,61 +1481,72 @@ CodeMotion() {
 
     for (auto FE : BlockToFactors[B]) {
       auto PE = FE->getPExpr();
-      if (FE->getIsLinked()) {
-        auto PHI = (PHINode *)FactorToPHI[FE];
-        // if (FE->getWillBeAvail()) continue;
-        // If Factor is Linked and Available we need to replace linked PHI
-        // instruction with a real calculation since we cannot wait longer delay
-        // the computation, unless it is a cycle
-        // if (FE->getIsAvail() && FE->getLater()) {
-        if (true) {
-          Expression * VE;
 
-          // If we have a cycled Factor we use one of the branch expression as
-          // the defining one
-          if (FE->getIsCycle()) {
-            // FIXME this only works if there are TWO incomming values
-            assert(FE->getVExprNum() == 2 && "Well, shit...");
-            // Push computation to the init block
-            // Find non-cycled expression
-            for (auto V : FE->getVExprs()) {
-              if (V->getVersion() != FE->getVersion()){
-                VE = V;
-                break;
-              }
-            }
-          // otherwise we create a new one and place it instead of the PHI
-          } else {
+      if (!FE->getCanBeAvail()) continue;
+
+      if (FE->getIsCycle()) {
+        if (FE->getVExprNum() != 2)
+          llvm_unreachable("well, shit..");
+
+        // Non-Cycled incomming Expression
+        Expression * VE = nullptr;
+        // The source of the incomming Expression
+        BasicBlock * PB = nullptr;
+        for (unsigned i = 0, l = FE->getVExprNum(); i < l; ++i) {
+          auto V = FE->getVExpr(i);
+          if (V->getVersion() != FE->getVersion()) {
+            VE = V;
+            PB = (BasicBlock *)FE->getPred(i);
+            break;
+          }
+        }
+
+        // Regardless of whether the Factor is materialized its non-cycled
+        // expression may be a constant which we regard as bottom value. In any
+        // case if the incomming value is bottom we need to create one.
+        if (IsBottom(*VE)) {
+          auto I = PE->getProto()->clone();
+
+          VE = CreateExpression(*I);
+          PExprToInsts[PE].insert(I);
+          VExprToInst[VE] = I;
+          VExprToPExpr[VE] = PE;
+          InstToVExpr[I] = VE;
+
+          InstrSDFS[I] = InstrSDFS[&PB->back()];
+          InstrDFS[I] = InstrDFS[&PB->back()];
+          I->insertBefore(PB->getTerminator());
+        }
+
+        if (FE->getIsMaterialized()) {
+          ReplaceMatFactorWExpression(FE, GetSubstitution(VE));
+        } else {
+          ReplaceFactorWExpression(FE, VE);
+        }
+      } else {
+        // If Mat and Later this Factor is useless and we replace it with a real
+        // computation
+        if (FE->getIsMaterialized() && FE->getLater()) {
+            auto PHI = (PHINode *)FactorToPHI[FE];
             auto I = PE->getProto()->clone();
 
-            VE = CreateExpression(*I);
-            VE->setSave(PHI->getNumUses());
+            auto VE = CreateExpression(*I);
             PExprToInsts[PE].insert(I);
             VExprToInst[VE] = I;
             VExprToPExpr[VE] = PE;
             InstToVExpr[I] = VE;
-            InstrSDFS[I] = InstrSDFS[&B->front()];
-            InstrDFS[I] = InstrDFS[&B->front()];
+
+            InstrSDFS[I] = InstrSDFS[&B->back()];
+            InstrDFS[I] = InstrDFS[&B->back()];
             I->insertBefore(PHI);
-          }
 
-          // Now any PHI reference will go to VE
-          Substitutions[FE] = VE;
+            ReplaceMatFactorWExpression(FE, VE);
 
-          VE->addSave(PHI->getNumUses());
-          PHI->replaceAllUsesWith(VExprToInst[VE]);
-
-          Changed = true;
+        // Otherwise we leave it be
+        } else {
+          PExprToVExprStack[PE].push({FSDFS, FE});
         }
-        assert(PHI->getNumUses() == 0 && "Must not have any uses");
-        KillList.push_back((Instruction *)PHI);
-      } else {
-        // Nothing here?
       }
-
-      // Push every Factor to the Stack regardless of the linkage, since further
-      // instructions may refer them
-      PExprToVExprStack[PE].push({FSDFS, FE});
     }
 
     // Insert Instructions
@@ -1532,7 +1622,7 @@ CodeMotion() {
     //  - Saved Expression
     for (auto F : P.getSecond()) {
       // No PHI insertion for NotAwailable or Linked Factors
-      if (!F->getWillBeAvail() || F->getIsLinked()) continue;
+      if (!F->getWillBeAvail() || F->getIsMaterialized()) continue;
       bool hasFactors = false;
       bool hasSaved = false;
       bool hasDeleted = false;

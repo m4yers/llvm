@@ -81,7 +81,7 @@ public:
   Expression(ExpressionType ET = ET_Base, unsigned O = ~2U, bool S = true)
       : EType(ET), Opcode(O), Version(-1),
         Proto(nullptr),
-        Saved(1), Reload(false) {}
+        Saved(0), Reload(false) {}
   // Expression(const Expression &) = delete;
   // Expression &operator=(const Expression &) = delete;
   virtual ~Expression();
@@ -363,7 +363,7 @@ private:
   SmallVector<Expression *, 8> Versions;
 
   // If True this Factor is linked to already existing PHI function
-  bool Linked;
+  bool Materialized;
 
   // If True this Factor merges init value and calculated value inside a cycle.
   // These must be treated differently since with all formal predicates
@@ -394,15 +394,15 @@ private:
 public:
   FactorExpression(const BasicBlock &BB)
       : Expression(ET_Factor), BB(BB),
-                   Linked(false), DownSafe(true),
+                   Materialized(false), DownSafe(true),
                    CanBeAvail(true), Later(true) { }
   FactorExpression() = delete;
   FactorExpression(const FactorExpression &) = delete;
   FactorExpression &operator=(const FactorExpression &) = delete;
   ~FactorExpression() override;
 
-  void setIsLinked(bool L) { Linked = L; }
-  bool getIsLinked() const { return Linked; }
+  void setIsMaterialized(bool L) { Materialized = L; }
+  bool getIsMaterialized() const { return Materialized; }
 
   void setIsCycle(bool C) { Cycle = C; }
   bool getIsCycle() const { return Cycle; }
@@ -453,10 +453,10 @@ public:
 
   bool getWillBeAvail() const { return CanBeAvail && !Later; }
 
-  // This is only True when this Factor is Linked and is DownSafe. It is
+  // This is only True when this Factor is Materialized and is DownSafe. It is
   // possible to gave False WBA at the same time. The meaning of this is that
   // the Factor is already materialized into a PHI and this PHI is used.
-  bool getIsAvail() const { return CanBeAvail && Linked; }
+  bool getIsAvail() const { return CanBeAvail && Materialized; }
 
   void setHasRealUse(unsigned P, bool HRU) { HasRealUse[P] = HRU; }
   bool getHasRealUse(unsigned P) const { return HasRealUse[P]; }
@@ -479,7 +479,7 @@ public:
     OS << ", BB: ";
     BB.printAsOperand(OS, false);
     OS << ", PE: " << (void *)PE;
-    OS << ", LNK: " << Linked;
+    OS << ", MAT: " << Materialized;
     OS << ", CYC: " << Cycle;
     OS << ", V: <";
     for (unsigned i = 0, l = Versions.size(); i < l; ++i) {
@@ -554,6 +554,9 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
   // ProtoExpression-to-Instructions map
   DenseMap<const Expression *, SmallPtrSet<const Instruction *, 5>> PExprToInsts;
 
+  // ProtoExpression-to-VersionedExpressions
+  DenseMap<const Expression *, SmallPtrSet<Expression *, 5>> PExprToVExprs;
+
   DenseMap<const Expression *, DenseMap<unsigned, SmallPtrSet<Expression *, 5>>> PExprToVersions;
 
   // ProtoExpression-to-BasicBlock map
@@ -566,9 +569,6 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
   // Map PHI to Factor if PHI joins two expressions of the same proto
   DenseMap<FactorExpression *, PHIExpression *> FExprToPHIExpr;
   DenseMap<PHIExpression *, FactorExpression *> PHIExprToFExpr;
-
-  // ProtoExpression-to-VersionedExpressions
-  DenseMap<const Expression *, SmallPtrSet<Expression *, 5>> PExprToVExprs;
 
   // VersionedExpression-to-ProtoVersioned
   DenseMap<const Expression *, const Expression *> VExprToPExpr;
@@ -625,6 +625,19 @@ private:
   bool IsBottom(const Expression &E);
 
   bool FactorHasRealUse(const FactorExpression *F);
+
+  void KillFactor(FactorExpression *);
+
+  // Go through all the Substitutions of the Expression and return the most
+  // recent one
+  Expression * GetSubstitution(Expression * E);
+
+  // Go through all the substitutions of the Expression and return the most
+  // recent value available
+  Value * GetValue(Expression * E);
+
+  void ReplaceMatFactorWExpression(FactorExpression * FE, Expression * E);
+  void ReplaceFactorWExpression(FactorExpression * FE, Expression * E);
 
   // Take a Value returned by simplification of Expression E/Instruction
   // I, and see if it resulted in a simpler expression. If so, return
