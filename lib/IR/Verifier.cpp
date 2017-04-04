@@ -3673,8 +3673,16 @@ void Verifier::verifyDominatesUse(Instruction &I, unsigned i) {
     return;
 
   const Use &U = I.getOperandUse(i);
-  Assert(DT.dominates(Op, U),
-         "Instruction does not dominate all uses!", Op, &I);
+  if (!DT.dominates(Op, U)) {
+    dbgs() << "Function " <<  I.getParent()->getParent()->getName();
+    dbgs() << "\n Op: ";
+    Op->print(dbgs());
+    dbgs() << "\n Inst: ";
+    I.print(dbgs());
+    llvm_unreachable("\nInstruction does not dominate all uses!");
+  }
+  // Assert(DT.dominates(Op, U),
+  //        "Instruction does not dominate all uses!", Op, &I);
 }
 
 void Verifier::visitDereferenceableMetadata(Instruction& I, MDNode* MD) {

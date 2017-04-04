@@ -457,7 +457,7 @@ public:
   // This is only True when this Factor is Materialized and is DownSafe. It is
   // possible to gave False WBA at the same time. The meaning of this is that
   // the Factor is already materialized into a PHI and this PHI is used.
-  bool getIsAvail() const { return CanBeAvail && Materialized; }
+  // bool getIsAvail() const { return CanBeAvail && Materialized; }
 
   void setHasRealUse(unsigned P, bool HRU) { HasRealUse[P] = HRU; }
   bool getHasRealUse(unsigned P) const { return HasRealUse[P]; }
@@ -502,7 +502,7 @@ public:
     OS << ", CBA: " << (CanBeAvail ? "T" : "F");
     OS << ", L: " << (Later ? "T" : "F");
     OS << ", WBA: " << (getWillBeAvail() ? "T" : "F");
-    OS << ", AV: " << (getIsAvail() ? "T" : "F");
+    // OS << ", AV: " << (getIsAvail() ? "T" : "F");
   }
 }; // class FactorExpression
 
@@ -572,10 +572,6 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
   DenseMap<const BasicBlock *, SmallVector<FactorExpression *, 5>> BlockToFactors;
   DenseMap<const FactorExpression *, const BasicBlock *> FactorToBlock;
 
-  // Map PHI to Factor if PHI joins two expressions of the same proto
-  DenseMap<FactorExpression *, PHIExpression *> FExprToPHIExpr;
-  DenseMap<PHIExpression *, FactorExpression *> PHIExprToFExpr;
-
   // VersionedExpression-to-ProtoVersioned
   DenseMap<const Expression *, const Expression *> VExprToPExpr;
 
@@ -590,7 +586,7 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
   // an Expression assumes existing Version it must define its Definition, so
   // that during kill time we could replace its use with a proper definition.
   DenseMap<Expression *, Expression *> Substitutions;
-  SmallVector<Instruction *, 32> ReloadList;
+  SmallVector<Instruction *, 32> RewireList;
   SmallVector<Instruction *, 32> KillList;
 
 public:
@@ -663,6 +659,7 @@ private:
   Expression * CreateExpression(Instruction &I);
 
   bool IgnoreExpression(const Expression &E);
+  bool IsRewiringOrKilling(Expression &E);
 
   void PrintDebug(const std::string &Caption);
 

@@ -298,8 +298,8 @@ ReplaceMatFactorWExpression(FactorExpression * FE, Expression * VE) {
   auto &Versions = PExprToVersions[PE][FE->getVersion()];
   for (auto V : Versions) {
     auto I = VExprToInst[V];
-    VE->addSave(I->getNumUses());
-    KillList.push_back(I);
+    Substitutions[V] = VE;
+    RewireList.push_back(I);
   }
 }
 
@@ -328,8 +328,8 @@ ReplaceFactorWExpression(FactorExpression * FE, Expression * VE) {
   auto &Versions = PExprToVersions[PE][FE->getVersion()];
   for (auto V : Versions) {
     auto I = VExprToInst[V];
-    VE->addSave(I->getNumUses());
-    KillList.push_back(I);
+    Substitutions[V] = VE;
+    RewireList.push_back(I);
   }
 }
 
@@ -588,6 +588,22 @@ IgnoreExpression(const Expression &E) {
          ET == ET_Constant;
 }
 
+bool SSAPRE::
+IsRewiringOrKilling(Expression &E) {
+  auto V = ExpToValue[&E];
+  for (auto R : RewireList) {
+    if (V == R)
+      return true;
+  }
+
+  for (auto K : KillList) {
+    if (V == K)
+      return true;
+  }
+
+  return false;
+}
+
 void SSAPRE::
 PrintDebug(const std::string &Caption) {
   dbgs() << "---------------------------------------------";
@@ -648,15 +664,24 @@ PrintDebug(const std::string &Caption) {
     dbgs() << "\n";
   }
 
+  dbgs() << "\nRewireList";
+  dbgs() << "\n---------------------------\n";
+  for (auto &K : RewireList) {
+    if (K->getParent()) {
+      K->print(dbgs());
+    }
+    dbgs() << "\n";
+  }
+
   dbgs() << "\nKillList";
-  dbgs() << "\n---------------------------";
+  dbgs() << "\n---------------------------\n";
   for (auto &K : KillList) {
     if (K->getParent()) {
-      dbgs() << "\n";
-      K->printAsOperand(dbgs());
+      K->print(dbgs());
     } else {
       dbgs() << "\n(removed)";
     }
+    dbgs() << "\n";
   }
 
   dbgs() << "\n---------------------------------------------\n";
@@ -832,7 +857,7 @@ Fini() {
   AvailDef.clear();
   BlockToInserts.clear();
   Substitutions.clear();
-  ReloadList.clear();
+  RewireList.clear();
   KillList.clear();
 }
 
@@ -1232,7 +1257,10 @@ Rename() {
   for (auto P : FactorToPHI) {
     auto LF = (FactorExpression *)P.getFirst();
     for (auto F : FExprs) {
+
+      if (F->getPExpr() != LF->getPExpr()) continue;
       if (F->getIsMaterialized() || LF == F) continue;
+
       bool Same = true;
       for (unsigned i = 0, l = LF->getVExprNum(); i < l; ++i) {
         auto LFVE = LF->getVExpr(i);
@@ -1256,6 +1284,7 @@ Rename() {
           break;
         }
       }
+
       if (Same) {
         FactorKillList.insert(F);
       }
@@ -1267,14 +1296,7 @@ Rename() {
     if (auto P = F->getProto()) {
       P->dropAllReferences();
     }
-    FExprs.erase(F);
-    auto &B = FactorToBlock[F];
-    auto &V = BlockToFactors[B];
-    for (auto VS = V.begin(), VV = V.end(); VS != VV; ++VS) {
-      if (*VS == F)
-        V.erase(VS);
-    }
-    FactorToBlock.erase(F);
+    KillFactor(F);
   }
 
   // Determine cyclic Factors of whats left
@@ -1321,12 +1343,12 @@ DownSafety() {
 void SSAPRE::
 ComputeCanBeAvail() {
   for (auto F : FExprs) {
-    for (auto V : F->getVExprs()) {
-      if (IsBottom(*V)) {
-        if (!F->getDownSafe() && F->getCanBeAvail() && !F->getIsCycle()) {
+    if (!F->getDownSafe() && F->getCanBeAvail()) {
+      for (auto V : F->getVExprs()) {
+        if (IsBottom(*V)) {
           ResetCanBeAvail(*F);
+          break;
         }
-        break;
       }
     }
   }
@@ -1390,7 +1412,7 @@ FinalizeVisit(BasicBlock &B) {
     F->setReload(false);
     auto V = F->getVersion();
     // Potentially available or already available Factors we add to the table
-    if (F->getWillBeAvail() || F->getIsAvail()) {
+    if (F->getWillBeAvail()) {
       auto PE = F->getPExpr();
       AvailDef[PE][V] = F;
     }
@@ -1432,7 +1454,7 @@ FinalizeVisit(BasicBlock &B) {
     // Or it was a Factor that for sure will be materialized, if not alredy
     // NOTE This wasn't in the paper, only real occurances force reload
     } else if (auto F = dyn_cast<FactorExpression>(ADPE[V])) {
-      if (F->getWillBeAvail() || F->getIsAvail()) {
+      if (F->getWillBeAvail()) {
         VE->setReload(true);
       }
     // Or it was a Real occurrence
@@ -1444,8 +1466,7 @@ FinalizeVisit(BasicBlock &B) {
 
   for (auto S : B.getTerminator()->successors()) {
     for (auto F : BlockToFactors[S]) {
-      // ??? Not sure whether Avail ought go through here
-      if (F->getWillBeAvail() || F->getIsAvail()) {
+      if (F->getWillBeAvail() && !F->getIsCycle()) {
         auto PE = F->getPExpr();
         auto PI = F->getPredIndex(&B);
         auto O = F->getVExpr(PI);
@@ -1531,7 +1552,14 @@ CodeMotion() {
     for (auto FE : BlockToFactors[B]) {
       auto PE = FE->getPExpr();
 
-      if (!FE->getCanBeAvail()) continue;
+      // It is there but not used so we delete it
+      if (FE->getIsMaterialized() && !FE->getDownSafe()) {
+        ReplaceFactorWExpression(FE, &BExpr);
+        auto PHI = (PHINode *)FactorToPHI[FE];
+        assert(PHI->getNumUses() == 0 && "Should not be like that");
+        KillList.push_back(PHI);
+        continue;
+      }
 
       if (FE->getIsCycle()) {
         if (FE->getVExprNum() != 2)
@@ -1599,7 +1627,8 @@ CodeMotion() {
 
           // Otherwise we leave it be
         } else {
-          PExprToVExprStack[PE].push({FSDFS, FE});
+          if (FE->getWillBeAvail())
+            PExprToVExprStack[PE].push({FSDFS, FE});
         }
       }
     }
@@ -1630,13 +1659,15 @@ CodeMotion() {
         }
       }
 
-      if (VE->getReload()) {
+      if (IsRewiringOrKilling(*VE)) {
+        // Already processed
+      } else if (VE->getReload()) {
         auto *VEStackTop = VEStack.empty() ? nullptr : VEStack.top().second;
         assert(VEStackTop && "This must not be null");
 
         // Replace usage
         Substitutions[VE] = VEStackTop;
-        ReloadList.push_back(&I);
+        RewireList.push_back(&I);
 
         // Update Factors
         for (auto F : FExprs) {
@@ -1709,8 +1740,8 @@ CodeMotion() {
     }
   }
 
-  // Reload marked instructions
-  for (auto I : ReloadList) {
+  // Rewire marked instructions
+  for (auto I : RewireList) {
     if (I->hasNUsesOrMore(1)) {
       auto *Def = Substitutions[InstToVExpr[I]];
       while (Def != Substitutions[Def]) {
