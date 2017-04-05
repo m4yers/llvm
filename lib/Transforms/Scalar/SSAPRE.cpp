@@ -69,7 +69,7 @@ FactorExpression::~FactorExpression() = default;
 //===----------------------------------------------------------------------===//
 
 // This is used as ⊥ version
-Expression BExpr(ET_Buttom, ~2U, -2000);
+Expression BExpr(ET_Buttom, ~2U, -10000);
 
 std::pair<unsigned, unsigned> SSAPRE::
 AssignDFSNumbers(BasicBlock *B, unsigned Start,
@@ -229,6 +229,62 @@ FactorHasRealUse(const FactorExpression *F) {
     }
   }
   return HasRealUse;
+}
+
+bool SSAPRE::
+FactorHasRealUseBefore(const FactorExpression *F, const BBVector_t &P,
+                       const Expression *E) {
+  auto EDFS = InstrDFS[VExprToInst[E]];
+
+  // If Factor is linked with a PHI we need to check its users.
+  if (auto PHI = FactorToPHI[F]) {
+    for (auto U : PHI->users()) {
+      // FIXME must not have linked factor
+      if (PHINode::classof(U)) continue;
+      auto UB = ((Instruction *)U)->getParent();
+      for (auto PB : P) {
+        // Block is on the Path and the User's DFS less or equal to Expression
+        if (UB == PB && InstrDFS[(Instruction *)U] <= EDFS)
+          return true;
+      }
+    }
+  }
+
+  // We check every Expression of the same version as the Factor we check, since
+  // by definition those will come after the Factor
+  auto &Versions = PExprToVersions[F->getPExpr()];
+  for (auto V : Versions[F->getVersion()]) {
+    for (auto U : VExprToInst[V]->users()) {
+      if (PHINode::classof(U)) continue;
+      auto UB = ((Instruction *)U)->getParent();
+      for (auto PB : P) {
+        // Block is on the Path and the User's DFS less or equal to Expression
+        if (UB == PB && InstrDFS[(Instruction *)U] <= EDFS)
+          return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+bool SSAPRE::
+HasRealUseBefore(const Expression *S, const BBVector_t &P,
+                 const Expression *E) {
+  auto EDFS = InstrDFS[VExprToInst[E]];
+  auto &Versions = PExprToVersions[VExprToPExpr[S]];
+  for (auto V : Versions[S->getVersion()]) {
+    for (auto U : VExprToInst[V]->users()) {
+      if (PHINode::classof(U)) continue;
+      auto UB = ((Instruction *)U)->getParent();
+      for (auto PB : P) {
+        // Block is on the Path and the User's DFS less or equal to Expression
+        if (UB == PB && InstrDFS[(Instruction *)U] <= EDFS)
+          return true;
+      }
+    }
+  }
+  return false;
 }
 
 void SSAPRE::
@@ -1016,14 +1072,14 @@ Rename() {
   DenseMap<const Expression *, int> PExprToCounter;
 
   // Each PExpr is mapped to a stack of VExpr that grow and shrink during DFS
-  // walk. Tops of these stacks are used to name a recent expression occurrence
-  // as a Factor operand.
+  // walk.
   PExprToVExprStack_t PExprToVExprStack;
+
+  BBVector_t Path;
 
   for (auto &P : PExprToInsts) {
     auto &PE = P.getFirst();
-    if (IgnoreExpression(*PE))
-      continue;
+    if (IgnoreExpression(*PE)) continue;
     PExprToCounter.insert({PE, 0});
     PExprToVExprStack.insert({PE, {}});
   }
@@ -1032,6 +1088,12 @@ Rename() {
     // Since factors live outside basic blocks we set theirs DFS as the first
     // instruction's in the block
     auto FSDFS = InstrSDFS[&B->front()];
+
+    // Backtrack path if necessary
+    while (!Path.empty() && InstrSDFS[&Path.back()->front()] > FSDFS)
+      Path.pop_back();
+
+    Path.push_back(B);
 
     // Set PHI versions first, since factors regarded as occurring at the end
     // of the predecessor blocks
@@ -1044,7 +1106,7 @@ Rename() {
 
     // Then Factors
     for (auto FE : BlockToFactors[B]) {
-      // We want to process LFactors specifically after the normal ones so the
+      // We want to process MFactors specifically after the normal ones so the
       // expressions will assume their versions
       if (FE->getIsMaterialized()) continue;
       auto PE = FE->getPExpr();
@@ -1052,7 +1114,7 @@ Rename() {
       PExprToVExprStack[PE].push({FSDFS, FE});
     }
 
-    // Then LFactors
+    // Then MFactors
     for (auto FE : BlockToFactors[B]) {
       if (!FE->getIsMaterialized()) continue;
       auto PE = FE->getPExpr();
@@ -1108,7 +1170,12 @@ Rename() {
       auto *VEStackTopF = VEStackTop
                             ? dyn_cast<FactorExpression>(VEStackTop)
                             : nullptr;
-      // Empty stack
+
+      // NOTE
+      // We do not push on the stack neither already seen versions nor operand
+      // definitions, since ... TODO finish this
+
+      // Stack is empty
       if (!VEStackTop) {
         VE->setVersion(PExprToCounter[PE]++);
         VEStack.push({SDFS, VE});
@@ -1126,9 +1193,26 @@ Rename() {
           VEStack.push({SDFS, VE});
 
           // STEP 3 Init: DownSafe
-          // If the top of the stack contains a Factor expression we clear its
-          // DownSafe flag because its result is not used and not anticipated
-          VEStackTopF->setDownSafe(false);
+          // If the top of the stack contains a Factor expression and its version
+          // is not used along this path we clear its DownSafe flag because its
+          // result is not anticipated by any other expression:
+          // ---------   ---------
+          //       \       /
+          //  ------------------
+          //   %V = Factor(...)
+          //
+          //        ...
+          //  ( N defs of %V)
+          //  ( M uses of %V)
+          //        ...
+          //
+          //   def an opd
+          //   new V
+          //  ------------------
+          //  If M == 0 we clear the %V's DownSafe flag
+          if (!FactorHasRealUseBefore(VEStackTopF, Path, VE)) {
+            VEStackTopF->setDownSafe(false);
+          }
         }
       // Real occurrence
       } else {
@@ -1155,36 +1239,6 @@ Rename() {
       }
 
       PExprToVersions[PE][VE->getVersion()].push_back(VE);
-
-      // if (VEStackTop) {
-      //   // TODO Here we campare VEStackTop used operands' versions against
-      //   // current operands' versions on their respected stacks, if they match
-      //   // we use its version, otherwise assign a new one. If it happens that
-      //   // a Factor is on top of the stack we check whether its operands'
-      //   // definitions dominate this Factor, otherwise assign a new version
-      //   //
-      //   // For now every Expression after its Factor assumes its version since
-      //   // its operands are defined before this Factor.
-      //
-      //   // If the top of stack contains take its version
-      //   VE->setVersion(VEStackTop->getVersion());
-      //   // Set top of the stack as a defining occurrance for the current
-      //   // Expression
-      //   Substitutions[VE] = VEStackTop;
-      // } else {
-      //   // Otherwise assign new version
-      //   VE->setVersion(PExprToCounter[PE]++);
-      //
-      //   // STEP 3 Init: DownSafe
-      //   // If the top of the stack contains a Factor expression we clear its
-      //   // DownSafe flag because its result is not used and not anticipated
-      //   // if (VEStackTop && FactorExpression::classof(VEStackTop)) {
-      //   //   auto *F = dyn_cast<FactorExpression>(VEStackTop);
-      //   //   F->setDownSafe(false);
-      //   // }
-      //
-      //   VEStack.push({SDFS, VE});
-      // }
     }
 
     // For a terminator we need to visit every cfg successor of this block
@@ -1192,16 +1246,29 @@ Rename() {
     auto *T = B->getTerminator();
     for (auto S : T->successors()) {
       for (auto F : BlockToFactors[S]) {
-        // Linked Factor's operands are already versioned and set
-        if (F->getIsMaterialized()) continue;
         auto PE = F->getPExpr();
-        auto &VEStack = PExprToVExprStack[PE];
-        size_t PI = F->getPredIndex(B);
+        auto PI = F->getPredIndex(B);
         assert(PI != -1UL && "Should not be the case");
+
+        auto &VEStack = PExprToVExprStack[PE];
         auto VEStackTop = VEStack.empty() ? nullptr : VEStack.top().second;
         auto VE = VEStack.empty() ? GetBottom() : VEStackTop;
 
-        F->setVExpr(PI, VE);
+        // Linked Factor's operands are already versioned and set
+        if (F->getIsMaterialized()) {
+          VE = F->getVExpr(PI);
+        } else {
+          F->setVExpr(PI, VE);
+        }
+
+        if (IsBottom(*VE)) continue;
+
+        // DEBUG(dbgs() << "\nPATH:";
+        // for (auto PB : Path) {
+        //   dbgs() << " ";
+        //   PB->printAsOperand(dbgs());
+        // }
+        // dbgs() << "\n");
 
         // STEP 3 Init: HasRealUse
         bool HasRealUse = false;
@@ -1209,22 +1276,13 @@ Rename() {
           // To check Factor's usage we need to check usage of the Expressions
           // of the same version
           if (FactorExpression::classof(VEStackTop)) {
-            HasRealUse = FactorHasRealUse((FactorExpression *)VEStackTop);
+            HasRealUse = FactorHasRealUseBefore(
+                           (FactorExpression *)VEStackTop,
+                           Path,
+                           InstToVExpr[T]);
           // If it is a real expression we check the usage directly
           } else if (BasicExpression::classof(VEStackTop)) {
-            auto Inst = VExprToInst[VEStackTop];
-            int NumUses = Inst->getNumUses();
-            if (NumUses == 0) {
-              HasRealUse = false;
-            // If the Value is used by a PHI it is not counted as a use
-            } else {
-              for (auto U : Inst->users()) {
-                if (!PHINode::classof(U)) {
-                  HasRealUse = true;
-                  break;
-                }
-              }
-            }
+            HasRealUse = HasRealUseBefore(VEStackTop, Path, InstToVExpr[T]);
           }
         }
 
@@ -1240,7 +1298,7 @@ Rename() {
         auto &VEStack = P.getSecond();
         if (VEStack.empty()) continue;
         if (auto *F = dyn_cast<FactorExpression>(VEStack.top().second)) {
-          if (!FactorHasRealUse(F))
+          if (!FactorHasRealUseBefore(F, Path, InstToVExpr[T]))
             F->setDownSafe(false);
         }
       }
@@ -1332,8 +1390,7 @@ DownSafety() {
   // Here we propagate DownSafety flag initialized during Step 2 up the Factor
   // graph for each expression
   for (auto F : FExprs) {
-    if (F->getDownSafe())
-      continue;
+    if (F->getDownSafe()) continue;
     for (size_t i = 0, l = F->getVExprNum(); i < l; ++i) {
       ResetDownSafety(*F, i);
     }
@@ -1552,19 +1609,13 @@ CodeMotion() {
     for (auto FE : BlockToFactors[B]) {
       auto PE = FE->getPExpr();
 
-      // It is there but not used so we delete it
-      if (FE->getIsMaterialized() && !FE->getDownSafe()) {
-        ReplaceFactorWExpression(FE, &BExpr);
-        auto PHI = (PHINode *)FactorToPHI[FE];
-        assert(PHI->getNumUses() == 0 && "Should not be like that");
-        KillList.push_back(PHI);
-        continue;
-      }
-
       if (FE->getIsCycle()) {
         if (FE->getVExprNum() != 2)
           llvm_unreachable("well, shit..");
 
+        // Cycled Expression
+        Expression * CE = nullptr;
+        unsigned CI;
         // Non-Cycled incomming Expression
         Expression * VE = nullptr;
         // The source of the incomming Expression
@@ -1574,8 +1625,19 @@ CodeMotion() {
           if (V->getVersion() != FE->getVersion()) {
             VE = V;
             PB = (BasicBlock *)FE->getPred(i);
-            break;
+          } else {
+            CE = V;
+            CI = i;
           }
+        }
+
+        // Cycled side is never used
+        if (!FE->getHasRealUse(CI) && !FE->getDownSafe()) {
+          ReplaceFactorWExpression(FE, &BExpr);
+          auto PHI = (PHINode *)FactorToPHI[FE];
+          assert(PHI->getNumUses() == 0 && "Should not be like that");
+          KillList.push_back(PHI);
+          continue;
         }
 
         // Regardless of whether the Factor is materialized its non-cycled
@@ -1741,7 +1803,8 @@ CodeMotion() {
   }
 
   // Rewire marked instructions
-  for (auto I : RewireList) {
+  while (!RewireList.empty()) {
+    auto I = RewireList.pop_back_val();
     if (I->hasNUsesOrMore(1)) {
       auto *Def = Substitutions[InstToVExpr[I]];
       while (Def != Substitutions[Def]) {
@@ -1852,6 +1915,8 @@ runImpl(Function &F,
   DEBUG(PrintDebug("STEP 6: CodeMotion"));
 
   Fini();
+
+  DEBUG(F.dump());
 
   if (!Changed)
     return PreservedAnalyses::all();

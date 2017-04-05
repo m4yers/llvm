@@ -510,6 +510,8 @@ public:
 
 using namespace ssapre;
 
+typedef SmallVector<BasicBlock *, 32> BBVector_t;
+
 /// Performs SSA PRE pass.
 class SSAPRE : public PassInfoMixin<SSAPRE> {
   const DataLayout *DL;
@@ -627,7 +629,18 @@ private:
   // value but a constant or a variable since they do not provide a computation
   bool IsBottom(const Expression &E);
 
+  // ??? Remove it?
   bool FactorHasRealUse(const FactorExpression *F);
+
+  // Find out whether Factor(its versions) is used on a Path before(including)
+  // another Expression occurance
+  bool FactorHasRealUseBefore(const FactorExpression *F,
+                              const BBVector_t &P,
+                              const Expression *E);
+
+  bool HasRealUseBefore(const Expression *S,
+                        const BBVector_t &P,
+                        const Expression *E);
 
   void KillFactor(FactorExpression *);
 
