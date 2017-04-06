@@ -29,6 +29,7 @@ namespace llvm {
 namespace ssapre LLVM_LIBRARY_VISIBILITY {
 
 class SSAPRELegacy;
+class TokenPropagationSolver;
 
 
 //===----------------------------------------------------------------------===//
@@ -402,6 +403,8 @@ public:
   FactorExpression &operator=(const FactorExpression &) = delete;
   ~FactorExpression() override;
 
+  const BasicBlock * getBB() const { return &BB; }
+
   void setIsMaterialized(bool L) { Materialized = L; }
   bool getIsMaterialized() const { return Materialized; }
 
@@ -511,6 +514,7 @@ public:
 using namespace ssapre;
 
 typedef SmallVector<BasicBlock *, 32> BBVector_t;
+typedef SmallVector<FactorExpression *, 32> FEVector_t;
 
 /// Performs SSA PRE pass.
 class SSAPRE : public PassInfoMixin<SSAPRE> {
@@ -524,7 +528,7 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
   typedef std::stack<UIntExpressionPair_t> ExprStack_t;
   typedef DenseMap<const Expression *, ExprStack_t> PExprToVExprStack_t;
 
-  SmallPtrSet<const BasicBlock *, 32> JoinBlocks;
+  SmallVector<const BasicBlock *, 32> JoinBlocks;
 
   // Values' stuff
   DenseMap<Expression *, const Value *> ExpToValue;
@@ -596,6 +600,7 @@ public:
 
 private:
   friend ssapre::SSAPRELegacy;
+  friend ssapre::TokenPropagationSolver;
 
   std::pair<unsigned, unsigned> AssignDFSNumbers(BasicBlock *B, unsigned Start,
                                                  InstrToOrderType *M,

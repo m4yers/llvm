@@ -662,7 +662,7 @@ IsRewiringOrKilling(Expression &E) {
 
 void SSAPRE::
 PrintDebug(const std::string &Caption) {
-  dbgs() << "---------------------------------------------";
+  dbgs() << "\n\n---------------------------------------------";
   dbgs() << Caption << "\n";
 
   dbgs() << "\nInstructions";
@@ -760,7 +760,7 @@ Init(Function &F) {
   unsigned Counter = 0;
   for (auto &B : *RPOT) {
     if (!B->getSinglePredecessor()) {
-      JoinBlocks.insert(B);
+      JoinBlocks.push_back(B);
     }
 
     auto *Node = DT->getNode(B);
@@ -851,9 +851,10 @@ Init(Function &F) {
   //    |             SDFSO(DFS(DT),SDFS(DT)): { 1, 5, 4, 2, 3 }
   //    e                                          <  >  >  <
   //
-  // So this SDFSO which maps our RPOish DFS(DT) onto SDFS order gives us points
-  // where we must backtrace our context(stack or whatever we keep updated).
-  // These are the places where the next SDFSO is less than the previous one.
+  // So this SDFSO which maps our RPOish DFS(DT) onto SDFS order gives us
+  // points where we must backtrace our context(stack or whatever we keep
+  // updated).  These are the places where the next SDFSO is less than the
+  // previous one.
   //
   for (auto &B : *RPOT) {
     auto *Node = DT->getNode(B);
@@ -917,45 +918,267 @@ Fini() {
   KillList.clear();
 }
 
+// PHI operands Prototype solver
+// NOTE The Solver works on assumption that there is only two incomming values.
+// NOTE I'm sure there is a pass that converts n-phi nodes to 2-phi nodes, or
+// NOTE it should be created anyway.
+namespace llvm {
+namespace ssapre {
+  typedef const Expression * Token_t;
+
+  // This structure encode an assumption that a SRC PHI is an operand of DST
+  // PHI, the second operand of which is TOK.
+  struct PropDst_t {
+    Token_t TOK;
+    const PHINode * DST;
+
+    PropDst_t() = delete;
+    PropDst_t(Token_t TOK, const PHINode *DST)
+      : TOK(TOK), DST(DST) {}
+  };
+
+  Token_t GetTop() { return (Expression *)0x704; }
+  Token_t GetBot() { return (Expression *)0x807; }
+  bool IsTop(Token_t T) { return T == GetTop(); }
+  bool IsBot(Token_t T) { return T == GetBot(); }
+  bool IsTopOrBottom(Token_t T) { return IsTop(T) || IsBot(T); }
+
+  // Rules:
+  //   T    ^ T    = T      Exp  ^ T    = Exp
+  //   Exp  ^ Exp  = Exp    ExpX ^ ExpY = F
+  //   Exp  ^ F    = F      F    ^ T    = F
+  //   F    ^ F    = F
+  Token_t
+  CalculateToken(Token_t A, Token_t B) {
+    // T    ^ T    = T
+    // Exp  ^ Exp  = Exp
+    // F    ^ F    = F
+    if (A == B) {
+      return A;
+    }
+
+    // Exp  ^ T    = Exp
+    if (IsTop(A) && !IsTopOrBottom(B)) {
+      return B;
+    } else if (!IsTopOrBottom(A) && IsTop(B)) {
+      return A;
+    }
+
+    // Exp  ^ F    = F
+    if (IsBot(A) && !IsTopOrBottom(B)) {
+      return GetBot();
+    } else if (!IsTopOrBottom(A) && IsBot(B)) {
+      return GetBot();
+    }
+
+    // ExpX ^ ExpY = F
+    // F    ^ T    = F
+    return GetBot();
+  }
+
+  typedef DenseMap<const PHINode *, const FactorExpression *> PHIFactorMap_t;
+  typedef DenseMap<const PHINode *, Token_t> PHITokenMap_t;
+  typedef SmallVector<PropDst_t, 8> PropDstVector_t;
+  typedef DenseMap<const PHINode *, PropDstVector_t> SrcPropMap_t;
+  typedef DenseMap<const PHINode *, bool> SrcKillMap_t;
+  typedef SmallVector<const PHINode *, 8> PHIVector_t;
+
+  class TokenPropagationSolver {
+    SSAPRE &O;
+    PHIFactorMap_t PHIFactorMap;
+    PHITokenMap_t PHITokenMap;
+    SrcPropMap_t SrcPropMap;
+    SrcKillMap_t SrcKillMap;
+
+  public:
+    TokenPropagationSolver() = delete;
+    TokenPropagationSolver(SSAPRE &O) : O(O) {}
+
+    void
+    CreateFactor(const PHINode *PHI, Token_t PE) {
+      auto E = PHIFactorMap[PHI];
+      assert(!E && "FE already exist");
+      E = O.CreateFactorExpression(*PE, *PHI->getParent());
+      PHIFactorMap[PHI] = E;
+      SrcKillMap[PHI] = false;
+    }
+
+    bool
+    HasTokenFor(const PHINode *PHI) {
+      return PHITokenMap.count(PHI) != 0;
+    }
+
+    Token_t
+    GetTokenFor(const PHINode *PHI) {
+      assert(HasTokenFor(PHI) && "Well...");
+      return PHITokenMap[PHI];
+    }
+
+    bool
+    HasFactorFor(const PHINode *PHI) {
+      return PHIFactorMap.count(PHI) != 0;
+    }
+
+    const FactorExpression *
+    GetFactorFor(const PHINode *PHI) {
+      assert(HasFactorFor(PHI));
+      return PHIFactorMap[PHI];
+    }
+
+    PHIFactorMap_t
+    GetLiveFactors() {
+      // Erase all killed Factors before returning the Map
+      for (auto P : SrcKillMap) {
+        if (P.getSecond()) {
+          // FIXME proper FE deletion here
+          PHIFactorMap.erase(P.getFirst());
+        }
+      }
+      return PHIFactorMap;
+    }
+
+    void
+    AddPropagations(Token_t T, const PHINode *S, PHIVector_t DL) {
+      for (auto D : DL) { AddPropagation(T, S, D); }
+    }
+
+    void
+    AddPropagation(Token_t T, const PHINode *S, const PHINode *D) {
+      if (!HasFactorFor(S)) CreateFactor(S, T);
+      if (!HasFactorFor(D)) CreateFactor(D, T);
+
+      if (!SrcPropMap.count(S)) {
+        SrcPropMap.insert({S, {{T, D}}});
+      } else {
+        SrcPropMap[S].push_back({T, D});
+      }
+    }
+
+    void
+    FinishPropagation(Token_t T, const PHINode *PHI) {
+      assert(!SrcKillMap[PHI] && "The Factor is already killed");
+
+      PHITokenMap.insert({PHI, T});
+
+      // Either Top or Bottom results in deletion of the Factor
+      if (IsTopOrBottom(T)) {
+        SrcKillMap[PHI] = true;
+      }
+
+      // Recursively finish every propagation
+      for (auto &PD : SrcPropMap[PHI]) {
+        auto R = CalculateToken(T, PD.TOK);
+        FinishPropagation(R, PD.DST);
+      }
+    }
+  };
+} // namespace ssapre
+} // namespace llvm
+
 void SSAPRE::
 FactorInsertion() {
-  // We examine each join block first to find already "materialized" Factors
+  TokenPropagationSolver TokSolver(*this);
+  // We examine in each join block first to find already "materialized" Factors
   for (auto B : JoinBlocks) {
     for (auto &I : *B) {
+
       // When we reach first non-phi instruction we stop
       if (&I == B->getFirstNonPHI()) break;
 
-      if (auto *PHI = dyn_cast<PHINode>(&I)) {
-        const Expression * PE = nullptr;
-        bool Same = true;
-        for (auto &Use : PHI->operands()) {
-          auto UVE = ValueToExp[Use.get()];
+      auto PHI = dyn_cast<PHINode>(&I);
+      if (!PHI) continue;
 
-          // A variable or a constant regarded as ⊥ value
-          if (VariableOrConstant(*UVE)) continue;
+      // Token is a meet of all the PHI's operands. We optimistically set it
+      // initially to Top
+      Token_t TOK = GetTop();
 
-          auto UPE = VExprToPExpr[UVE];
+      // Back Branch source
+      const PHINode * BackBranch = nullptr;
 
-          // If the first operand, just set PE and continue
-          if (!PE) {
-            PE = UPE;
+      for (unsigned i = 0, l = PHI->getNumOperands(); i < l; ++i) {
+        auto Op = PHI->getOperand(i);
+        auto OVE = ValueToExp[Op];
+
+        // A variable or a constant regarded as Top value
+        if (VariableOrConstant(*OVE)) {
+          TOK = CalculateToken(TOK, GetTop());
+          continue;
+        }
+
+        if (auto OPHI = dyn_cast<PHINode>(Op)) {
+          if (InstrDFS[Op] > InstrDFS[PHI]) {
+            // FIXME doc, it is not just a cycle, any back branch
+            // This is a cycle and the operand is not yet processed by this
+            // loop.  We will use a rolling Token that will provide us with a
+            // current value that we propagate upwards. Once we reached the top
+            // we will verify whether our assumption was correct. If it was,
+            // all the PHIs we have visited and are using the same Token will
+            // assume this Token as a PE of its operand. If at the the end, or
+            // along the way we get a Bottom(F) value we won't be able to
+            // connect these PHI with the same PE. If the Bottom was
+            // encountered in the middle of traversal we still can get some
+            // joined PHIs if we start the process from this Bottom.  The
+            // propagation process stops if we encounter that the rest of the
+            // operands are either Expression with the same PE or Constant or
+            // Variable or Nothing in this case it is a success; or we
+            // encounter Expression with different PE, this is a failure case.
+            TOK = CalculateToken(TOK, GetTop());
+            assert(!BackBranch && "Must not be a second Back Branch");
+            BackBranch = OPHI;
             continue;
           }
 
-          // The Protos mismatch, nothing to do here
-          if (PE != UPE) {
-            Same = false;
-            break;
-          }
-        }
+          // If the User is a PHI and it is linked to a Factor already, this
+          // means this PHI/Factor joins expressions of the same type
+          if (auto FOVE = PHIToFactor[OPHI]) {
+            TOK = CalculateToken(TOK, FOVE->getPExpr());
 
-        // If all the operands are the same we have a materialized Factor here,
-        // so we need to create a Factor instance and link it with this PHI.
-        if (Same) {
-          auto F = CreateFactorExpression(*PE, *B);
+          // Another back-branched PHI
+          } else if (TokSolver.HasFactorFor(OPHI)) {
+            // If we already know the Token for this PHI, use it, otherwise it
+            // is Bottom
+            Token_t T = TokSolver.HasTokenFor(OPHI)
+                          ? TokSolver.GetTokenFor(OPHI)
+                          : GetTop();
+            TOK = CalculateToken(TOK, T);
+
+          // Otherwise it is Bottom
+          } else {
+            TOK = CalculateToken(TOK, GetBottom());
+          }
+          continue;
+        // Otherwise we use whatever this VE is prototyped by
+        } else {
+          TOK = CalculateToken(TOK, VExprToPExpr[OVE]);
+          continue;
+        }
+      }
+
+      // This PHI has back branches and we are still not sure whether it is a
+      // materialized Factor.
+      if (BackBranch) {
+
+        // It is not a materialized Factor for sure
+        if (IsBot(TOK)) break;
+
+        // Now we have either an Expression or Top value to propagate
+        // upwards. We get/create Factors for current PHI and its cycle PHI
+        // operands and link them appropriately.
+        TokSolver.AddPropagation(TOK, BackBranch, PHI);
+
+      // Otherwise we have a certain result for this PHI
+      } else {
+        // If there is a dependency on this PHI, finish it and wait till all
+        // the propagations are done
+        if (TokSolver.HasFactorFor(PHI)) {
+          TokSolver.FinishPropagation(TOK, PHI);
+
+        // Or if the result is an Expression we just create a new Factor
+        } else if (!IsTopOrBottom(TOK)) {
+          auto F = CreateFactorExpression(*TOK, *B);
 
           F->setIsMaterialized(true);
-          F->setPExpr(PE);
+          F->setPExpr(TOK);
           FactorToPHI[F] = PHI;
           PHIToFactor[PHI] = F;
 
@@ -976,9 +1199,55 @@ FactorInsertion() {
     }
   }
 
+  // Process proven-to-be materialized Factor/PHIs
+  for (auto &P : TokSolver.GetLiveFactors()) {
+    auto PHI = P.getFirst();
+    auto B = PHI->getParent();
+    auto F = (FactorExpression *)P.getSecond();
+    auto T = TokSolver.GetTokenFor(PHI);
+
+    F->setIsMaterialized(true);
+    F->setPExpr(T);
+
+    FactorToPHI[F] = PHI;
+    PHIToFactor[PHI] = F;
+
+    // Set already know expression versions
+    for (unsigned i = 0, l = PHI->getNumOperands(); i < l; ++i) {
+      auto B = PHI->getIncomingBlock(i);
+      auto J = F->getPredIndex(B);
+      auto O = PHI->getOperand(i);
+
+      if (auto OPHI = dyn_cast<PHINode>(O)) {
+
+        // If the PHI is a back-branched Factor
+        if (TokSolver.HasFactorFor(OPHI)) {
+          F->setVExpr(J, (Expression *)TokSolver.GetFactorFor(OPHI));
+
+        // Or maybe this PHI was already processed
+        } else if (auto FE = PHIToFactor[OPHI]){
+          F->setVExpr(J, (Expression *)FE);
+
+        // If none above we just use PHIExpression
+        } else {
+          F->setVExpr(J, ValueToExp[O]);
+        }
+
+      } else {
+        F->setVExpr(J, ValueToExp[O]);
+      }
+    }
+
+    BlockToFactors[B].push_back({F});
+    FactorToBlock[F] = B;
+    Substitutions[F] = F;
+    FExprs.insert(F);
+  }
+
   // Factors are inserted in two cases:
   //   - for each block in expressions IDF
-  //   - for each phi of expression operand, which indicates expression alteration
+  //   - for each phi of expression operand, which indicates expression
+  //     alteration
   for (auto &P : PExprToInsts) {
     auto &PE = P.getFirst();
     if (IgnoreExpression(*PE) || PHIExpression::classof(PE))
@@ -993,9 +1262,9 @@ FactorInsertion() {
     IDFs.calculate(IDF);
 
     for (const auto &B : IDF) {
-      // We only need to insert a Factor at a merge point when it reaches a later
-      // occurance(a DEF at this point) of the expression. A later occurance will
-      // have a bigger DFS number;
+      // We only need to insert a Factor at a merge point when it reaches a
+      // later occurance(a DEF at this point) of the expression. A later
+      // occurance will have a bigger DFS number;
       bool ShouldInsert = false;
       // Starting DFS
       auto DFS = InstrDFS[&B->front()];
@@ -1016,10 +1285,10 @@ FactorInsertion() {
       if (!ShouldInsert) continue;
 
       // True if a Factor for this Expression with exactly the same arguments
-      // exists. There are two possibilities for arguments equality, there either
-      // none which means it wasn't versioned yet, or there are versions(or rather
-      // expression definitions) which means they were spawned out of PHIs. We
-      // are concern with the first case for now.
+      // exists. There are two possibilities for arguments equality, there
+      // either none which means it wasn't versioned yet, or there are
+      // versions(or rather expression definitions) which means they were
+      // spawned out of PHIs. We are concern with the first case for now.
       bool FactorExists = false;
       // FIXME remove the cycle
       for (auto F : BlockToFactors[B]) {
@@ -1065,10 +1334,10 @@ Rename() {
   //   - Factor expression
   //   - Factor operands, these generally versioned as Bottom
 
-  // The counters are used to number expression versions during DFS walk. Before
-  // the renaming phase each instruction(that we do not ignore) is of a proto
-  // type(PExpr), after this walk every expression is assign its own version and
-  // it becomes a versioned(or instantiated) expression(VExpr).
+  // The counters are used to number expression versions during DFS walk.
+  // Before the renaming phase each instruction(that we do not ignore) is of a
+  // proto type(PExpr), after this walk every expression is assign its own
+  // version and it becomes a versioned(or instantiated) expression(VExpr).
   DenseMap<const Expression *, int> PExprToCounter;
 
   // Each PExpr is mapped to a stack of VExpr that grow and shrink during DFS
@@ -1146,24 +1415,25 @@ Rename() {
       // TODO Any operand definition handling goes here
 
       // TODO
-      // This is a simplified version for operand comparison, normally we
-      // would check current operands on their respected stacks with operands
-      // for the VExpr on its stack, if they match we assign the same version,
-      // otherwise there was a def for VExpr operand and we need to assign a new
-      // version. This will be required when operand versioning is implemented.
+      // This is a simplified version for operand comparison, normally we would
+      // check current operands on their respected stacks with operands for the
+      // VExpr on its stack, if they match we assign the same version,
+      // otherwise there was a def for VExpr operand and we need to assign a
+      // new version. This will be required when operand versioning is
+      // implemented.
       //
       // For now this will suffice, the only case we reuse a version if we've
-      // seen this expression before, since in SSA there is a singe def for
-      // an operand.
+      // seen this expression before, since in SSA there is a singe def for an
+      // operand.
       //
       // This limits algorithm effectiveness, because we do not track operands'
       // versions we cannot prove that certain separate expressions are in fact
       // the same expressions of different versions. TBD, anyway.
       //
-      // Another thing related to not tracking operand versions, because of that
-      // there always will be a single definition of VExpr's operand and the
-      // VExpr itself will follow it in the traversal, thus, for now, we do not
-      // have to assign ⊥ version to the VExpr whenever we see its operand
+      // Another thing related to not tracking operand versions, because of
+      // that there always will be a single definition of VExpr's operand and
+      // the VExpr itself will follow it in the traversal, thus, for now, we do
+      // not have to assign ⊥ version to the VExpr whenever we see its operand
       // defined.
       auto &VEStack = PExprToVExprStack[PE];
       auto *VEStackTop = VEStack.empty() ? nullptr : VEStack.top().second;
@@ -1193,9 +1463,9 @@ Rename() {
           VEStack.push({SDFS, VE});
 
           // STEP 3 Init: DownSafe
-          // If the top of the stack contains a Factor expression and its version
-          // is not used along this path we clear its DownSafe flag because its
-          // result is not anticipated by any other expression:
+          // If the top of the stack contains a Factor expression and its
+          // version is not used along this path we clear its DownSafe flag
+          // because its result is not anticipated by any other expression:
           // ---------   ---------
           //       \       /
           //  ------------------
@@ -1316,6 +1586,7 @@ Rename() {
     auto LF = (FactorExpression *)P.getFirst();
     for (auto F : FExprs) {
 
+      if (F->getBB() != LF->getBB()) continue;
       if (F->getPExpr() != LF->getPExpr()) continue;
       if (F->getIsMaterialized() || LF == F) continue;
 
@@ -1324,9 +1595,9 @@ Rename() {
         auto LFVE = LF->getVExpr(i);
         auto FVE = F->getVExpr(i);
         // NOTE
-        // Kinda a special case, while assigning versioned expressions to a Factor
-        // we cannot infer that a variable or a constant is coming from the
-        // predecessor and we assign it to ⊥, but a Linked Factor will know
+        // Kinda a special case, while assigning versioned expressions to a
+        // Factor we cannot infer that a variable or a constant is coming from
+        // the predecessor and we assign it to ⊥, but a Linked Factor will know
         // for sure whether a constant/variable is involved.
         if (VariableOrConstant(*LFVE) && FVE == GetBottom()) continue;
 
@@ -1898,15 +2169,15 @@ runImpl(Function &F,
   Rename();
   DEBUG(PrintDebug("STEP 2: Renaming"));
 
+  // TEST remove after
+  Fini();
+  return PreservedAnalyses::all();
+
   DownSafety();
   DEBUG(PrintDebug("STEP 3: DownSafety"));
 
   WillBeAvail();
   DEBUG(PrintDebug("STEP 4: WillBeAvail"));
-
-  // TEST remove after
-  // Fini();
-  // return PreservedAnalyses::all();
 
   Finalize();
   DEBUG(PrintDebug("STEP 5: Finalize"));
