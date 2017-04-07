@@ -666,16 +666,14 @@ PrintDebug(const std::string &Caption) {
   dbgs() << "\n\n---------------------------------------------";
   dbgs() << Caption << "\n";
 
-  dbgs() << "\nInstructions";
+  dbgs() << "\nProgram";
   dbgs() << "\n(dfs) (instruction)";
   dbgs() << "\n---------------------------";
-  for (auto &V : DFSToInstr) {
-    auto I = dyn_cast<Instruction>(V);
-    dbgs() << "\n" << InstrDFS[I];
-    if (I->getParent())
-      dbgs() << "\t" << *I;
-    else
-      dbgs() << "\t(deleted)";
+  for (auto &B : *RPOT) {
+    for (auto &I : *B) {
+      dbgs() << "\n" << InstrDFS[&I];
+      dbgs() << "\t" << I;
+    }
   }
 
   dbgs() << "\n\nExpressions";
@@ -696,11 +694,13 @@ PrintDebug(const std::string &Caption) {
 
   dbgs() << "\nBlockToFactors";
   dbgs() << "\n---------------------------\n";
-  for (auto &P : BlockToFactors) {
-    dbgs() << "(" << P.getSecond().size() << ") ";
-    P.getFirst()->printAsOperand(dbgs(), false);
+  for (auto &B : *RPOT) {
+    auto BTF = BlockToFactors[B];
+    if (!BTF.size()) continue;
+    dbgs() << "(" << BTF.size() << ") ";
+    B->printAsOperand(dbgs(), false);
     dbgs() << ":";
-    for (const auto &F : P.getSecond()) {
+    for (const auto &F : BTF) {
       dbgs() << "\n";
       F->printInternal(dbgs());
     }
@@ -709,11 +709,13 @@ PrintDebug(const std::string &Caption) {
 
   dbgs() << "\nBlockToInserts";
   dbgs() << "\n---------------------------\n";
-  for (auto &P : BlockToInserts) {
-    dbgs() << "(" << P.getSecond().size() << ") ";
-    P.getFirst()->printAsOperand(dbgs(), false);
+  for (auto &B : *RPOT) {
+    auto BTI = BlockToInserts[B];
+    if (!BTI.size()) continue;
+    dbgs() << "(" << BTI.size() << ") ";
+    B->printAsOperand(dbgs(), false);
     dbgs() << ":";
-    for (const auto &I : P.getSecond()) {
+    for (const auto &I : BTI) {
       auto VE = InstToVExpr[I];
       dbgs() << "\n";
       VE->printInternal(dbgs());
@@ -837,7 +839,7 @@ Init(Function &F) {
   auto DFI = df_begin(DT->getRootNode());
   for (auto DFE = df_end(DT->getRootNode()); DFI != DFE; ++DFI) {
     auto B = DFI->getBlock();
-    auto BlockRange = AssignDFSNumbers(B, ICount, &InstrDFS, &DFSToInstr);
+    auto BlockRange = AssignDFSNumbers(B, ICount, &InstrDFS, nullptr);
     ICount += BlockRange.second - BlockRange.first + ICountGrowth;
   }
 
@@ -1270,12 +1272,9 @@ FactorInsertion() {
       // later occurance(a DEF at this point) of the expression. A later
       // occurance will have a bigger DFS number;
       bool ShouldInsert = false;
-      // Starting DFS
-      auto DFS = InstrDFS[&B->front()];
       // FIXME remove the cycle
-      while (DFS < DFSToInstr.size()) {
-        auto I = DFSToInstr[DFS++];
-        auto OE = ValueToExp[I];
+      for (auto &I : *B) {
+        auto OE = ValueToExp[&I];
         auto OPE = VExprToPExpr[OE];
 
         // If Proto of the occurance matches the PE we should insert here
