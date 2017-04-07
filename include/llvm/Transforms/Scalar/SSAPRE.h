@@ -380,9 +380,6 @@ private:
   // cycle, or at least in the same cycle as init.
   bool Cycle;
 
-  // Contains the predecessor index that creates a local cycle
-  bool CycleIndex;
-
   // If True expression is Anticipated on every path leading from this Factor
   bool DownSafe;
 
@@ -396,7 +393,7 @@ private:
 public:
   FactorExpression(const BasicBlock &BB)
       : Expression(ET_Factor), BB(BB),
-                   Materialized(false), DownSafe(true),
+                   Materialized(false), Cycle(false), DownSafe(true),
                    CanBeAvail(true), Later(true) { }
   FactorExpression() = delete;
   FactorExpression(const FactorExpression &) = delete;

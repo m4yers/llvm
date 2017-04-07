@@ -754,7 +754,10 @@ Init(Function &F) {
     ValueToVAExp[&A] = VAExp;
   }
 
-  unsigned ICount = 0;
+  // Each block starts its count from N millions, this will allow us add
+  // instructions within wide DFS/SDFS range
+  unsigned ICountGrowth = 100000;
+  unsigned ICount = ICountGrowth;
   // DFSToInstr.emplace_back(nullptr);
 
   DenseMap<const DomTreeNode *, unsigned> RPOOrdering;
@@ -835,7 +838,7 @@ Init(Function &F) {
   for (auto DFE = df_end(DT->getRootNode()); DFI != DFE; ++DFI) {
     auto B = DFI->getBlock();
     auto BlockRange = AssignDFSNumbers(B, ICount, &InstrDFS, &DFSToInstr);
-    ICount += BlockRange.second - BlockRange.first;
+    ICount += BlockRange.second - BlockRange.first + ICountGrowth;
   }
 
   // Now we need to create Reverse Sorted Dominator Tree, where siblings sorted
@@ -869,12 +872,12 @@ Init(Function &F) {
   }
 
   // Calculate Instruction-to-SDFS map
-  ICount = 1;
+  ICount = ICountGrowth;
   DFI = df_begin(DT->getRootNode());
   for (auto DFE = df_end(DT->getRootNode()); DFI != DFE; ++DFI) {
     auto B = DFI->getBlock();
     auto BlockRange = AssignDFSNumbers(B, ICount, &InstrSDFS, nullptr);
-    ICount += BlockRange.second - BlockRange.first;
+    ICount += BlockRange.second - BlockRange.first + ICountGrowth;
   }
 }
 
@@ -1819,8 +1822,9 @@ FinalizeVisit(BasicBlock &B) {
           ExpToValue[VE] = I;
           ValueToExp[I] = VE;
           Substitutions[VE] = VE;
-          InstrSDFS[I] = InstrSDFS[B.getTerminator()];
-          InstrDFS[I] = InstrDFS[B.getTerminator()];
+          auto T = B.getTerminator();
+          InstrSDFS[I] = InstrSDFS[T]; InstrSDFS[T]++;
+          InstrDFS[I]  = InstrDFS[T];  InstrDFS[T]++;
           F->setVExpr(PI, VE);
           F->setHasRealUse(PI, true);
           if (!BlockToInserts.count(&B)) {
@@ -1927,9 +1931,10 @@ CodeMotion() {
           VExprToPExpr[VE] = PE;
           InstToVExpr[I] = VE;
 
-          InstrSDFS[I] = InstrSDFS[&PB->back()];
-          InstrDFS[I] = InstrDFS[&PB->back()];
-          I->insertBefore(PB->getTerminator());
+          auto T = PB->getTerminator();
+          InstrDFS[I]  = InstrDFS[T];  InstrDFS[T]++;
+          InstrSDFS[I] = InstrSDFS[T]; InstrSDFS[T]++;
+          I->insertBefore(T);
         }
 
         if (FE->getIsMaterialized()) {
@@ -1941,7 +1946,6 @@ CodeMotion() {
         // If Mat and Later this Factor is useless and we replace it with a real
         // computation
         if (FE->getIsMaterialized() && FE->getLater()) {
-          auto PHI = (PHINode *)FactorToPHI[FE];
           auto I = PE->getProto()->clone();
 
           auto VE = CreateExpression(*I);
@@ -1953,9 +1957,10 @@ CodeMotion() {
           VExprToPExpr[VE] = PE;
           InstToVExpr[I] = VE;
 
-          InstrSDFS[I] = InstrSDFS[&B->back()];
-          InstrDFS[I] = InstrDFS[&B->back()];
-          I->insertBefore(PHI);
+          auto T = B->getFirstNonPHI();
+          InstrDFS[I]  = InstrDFS[T];  InstrDFS[T]++;
+          InstrSDFS[I] = InstrSDFS[T]; InstrSDFS[T]++;
+          I->insertBefore(T);
 
           ReplaceMatFactorWExpression(FE, VE);
 
