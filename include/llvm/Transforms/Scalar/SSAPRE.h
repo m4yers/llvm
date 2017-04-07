@@ -7,8 +7,8 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file provides the interface for LLVM's SSA Partial Redundancy Elimination
-// pass.
+// This file provides the interface for LLVM's SSA Partial Redundancy
+// Elimination pass.
 //
 //===----------------------------------------------------------------------===//
 
@@ -375,9 +375,9 @@ private:
   // block since any constant/variable is regarded as bottom. This of course
   // add register pressure
   //
-  // The second course of actions would be to push the computation directly
-  // to the first use place, but we need to prove that this place is not inside
-  // a cycle, or at least in the same cycle as init.
+  // The second course of actions would be to push the computation directly to
+  // the first use place, but we need to prove that this place is not inside a
+  // cycle, or at least in the same cycle as init.
   bool Cycle;
 
   // Contains the predecessor index that creates a local cycle
@@ -386,8 +386,8 @@ private:
   // If True expression is Anticipated on every path leading from this Factor
   bool DownSafe;
 
-  // True if an Operand is a Real expression and not Factor or Expression Operand
-  // definition(⊥)
+  // True if an Operand is a Real expression and not Factor or Expression
+  // Operand definition(⊥)
   SmallVector<bool, 8> HasRealUse;
 
   bool CanBeAvail;
@@ -459,8 +459,8 @@ public:
 
   // This is only True when this Factor is Materialized and is DownSafe. It is
   // possible to gave False WBA at the same time. The meaning of this is that
-  // the Factor is already materialized into a PHI and this PHI is used.
-  // bool getIsAvail() const { return CanBeAvail && Materialized; }
+  // the Factor is already materialized into a PHI and this PHI is used.  bool
+  // getIsAvail() const { return CanBeAvail && Materialized; }
 
   void setHasRealUse(unsigned P, bool HRU) { HasRealUse[P] = HRU; }
   bool getHasRealUse(unsigned P) const { return HasRealUse[P]; }
@@ -547,9 +547,9 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
   DenseMap<const PHINode *, const FactorExpression *> PHIToFactor;
 
   // DFS info.
-  // This contains a mapping from Instructions to DFS numbers.
-  // The numbering starts at 1. An instruction with DFS number zero
-  // means that the instruction is dead.
+  // This contains a mapping from Instructions to DFS numbers.  The numbering
+  // starts at 1. An instruction with DFS number zero means that the
+  // instruction is dead.
   typedef DenseMap<const Value *, unsigned> InstrToOrderType;
   InstrToOrderType InstrDFS;
   InstrToOrderType InstrSDFS;
@@ -606,11 +606,11 @@ private:
                                                  InstrToOrderType *M,
                                                  OrderedInstrType *V);
 
-  // This function provides global ranking of operations so that we can place them
-  // in a canonical order.  Note that rank alone is not necessarily enough for a
-  // complete ordering, as constants all have the same rank.  However, generally,
-  // we will simplify an operation with all constants so that it doesn't matter
-  // what order they appear in.
+  // This function provides global ranking of operations so that we can place
+  // them in a canonical order.  Note that rank alone is not necessarily enough
+  // for a complete ordering, as constants all have the same rank.  However,
+  // generally, we will simplify an operation with all constants so that it
+  // doesn't matter what order they appear in.
   unsigned int GetRank(const Value *V) const;
 
   // This is a function that says whether two commutative operations should
@@ -660,9 +660,8 @@ private:
   void ReplaceMatFactorWExpression(FactorExpression * FE, Expression * E);
   void ReplaceFactorWExpression(FactorExpression * FE, Expression * E);
 
-  // Take a Value returned by simplification of Expression E/Instruction
-  // I, and see if it resulted in a simpler expression. If so, return
-  // that expression.
+  // Take a Value returned by simplification of Expression E/Instruction I, and
+  // see if it resulted in a simpler expression. If so, return that expression.
   Expression * CheckSimplificationResults(Expression *E,
                                           Instruction &I,
                                           Value *V);

@@ -239,8 +239,9 @@ FactorHasRealUseBefore(const FactorExpression *F, const BBVector_t &P,
   // If Factor is linked with a PHI we need to check its users.
   if (auto PHI = FactorToPHI[F]) {
     for (auto U : PHI->users()) {
-      // FIXME must not have linked factor
-      if (PHINode::classof(U)) continue;
+      // Ignore PHIs that are linked with Factors, since those bonds solved
+      // through the main algorithm
+      if (PHINode::classof(U) && PHIToFactor[(PHINode*)U]) continue;
       auto UB = ((Instruction *)U)->getParent();
       for (auto PB : P) {
         // Block is on the Path and the User's DFS less or equal to Expression
@@ -250,12 +251,12 @@ FactorHasRealUseBefore(const FactorExpression *F, const BBVector_t &P,
     }
   }
 
-  // We check every Expression of the same version as the Factor we check, since
-  // by definition those will come after the Factor
+  // We check every Expression of the same version as the Factor we check,
+  // since by definition those will come after the Factor
   auto &Versions = PExprToVersions[F->getPExpr()];
   for (auto V : Versions[F->getVersion()]) {
     for (auto U : VExprToInst[V]->users()) {
-      if (PHINode::classof(U)) continue;
+      if (PHINode::classof(U) && PHIToFactor[(PHINode*)U]) continue;
       auto UB = ((Instruction *)U)->getParent();
       for (auto PB : P) {
         // Block is on the Path and the User's DFS less or equal to Expression
@@ -275,7 +276,7 @@ HasRealUseBefore(const Expression *S, const BBVector_t &P,
   auto &Versions = PExprToVersions[VExprToPExpr[S]];
   for (auto V : Versions[S->getVersion()]) {
     for (auto U : VExprToInst[V]->users()) {
-      if (PHINode::classof(U)) continue;
+      if (PHINode::classof(U) && PHIToFactor[(PHINode*)U]) continue;
       auto UB = ((Instruction *)U)->getParent();
       for (auto PB : P) {
         // Block is on the Path and the User's DFS less or equal to Expression
@@ -2170,8 +2171,8 @@ runImpl(Function &F,
   DEBUG(PrintDebug("STEP 2: Renaming"));
 
   // TEST remove after
-  Fini();
-  return PreservedAnalyses::all();
+  // Fini();
+  // return PreservedAnalyses::all();
 
   DownSafety();
   DEBUG(PrintDebug("STEP 3: DownSafety"));
