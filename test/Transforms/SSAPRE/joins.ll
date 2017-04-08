@@ -10,7 +10,9 @@ target datalayout = "e-p:64:64:64-p1:16:16:16-i1:8:8-i8:8:8-i16:16:16-i32:32:32-
 ;        -------------                     -------------
 ; CHECK-LABEL: @join_1(
 ; CHECK-NOT:   add
+; CHECK-NOT:   add
 ; CHECK-NOT:   phi
+; CHECK-NOT:   add
 define i32 @join_1(i32, i8**) #0 {
   %3 = icmp ne i32 %0, 0
   br i1 %3, label %4, label %6
@@ -32,7 +34,7 @@ define i32 @join_1(i32, i8**) #0 {
 ;        -------------          //         -------------
 ;            ret 0                             ret 0
 ;        -------------                     -------------
-; CHECK-LABEL: @join_1_used(
+; CHECK-LABEL: @join_2(
 ; CHECK:       add
 ; CHECK:       inttoptr
 ; CHECK:       load
@@ -40,7 +42,8 @@ define i32 @join_1(i32, i8**) #0 {
 ; CHECK-NOT:   add
 ; CHECK:       br
 ; CHECK-NOT:   phi
-define i64 @join_1_used(i64, i8**) #0 {
+; CHECK-NOT:   add
+define i64 @join_2(i64, i8**) #0 {
   %3 = icmp ne i64 %0, 0
   br i1 %3, label %4, label %6
 
@@ -65,7 +68,7 @@ define i64 @join_1_used(i64, i8**) #0 {
 ;       %p = phi(%5,%7)                   %p = phi(%5,%7)
 ;       ret %p                            ret %p
 ;      -----------------                 -----------------
-; CHECK-LABEL: @join_2(
+; CHECK-LABEL: @join_3(
 ; CHECK:       br
 ; CHECK-NOT:   add
 ; CHECK:       br
@@ -73,7 +76,7 @@ define i64 @join_1_used(i64, i8**) #0 {
 ; CHECK:       br
 ; CHECK-NOT:   phi
 ; CHECK:       add
-define i32 @join_2(i32, i8**) #0 {
+define i32 @join_3(i32, i8**) #0 {
   %3 = icmp ne i32 %0, 0
   br i1 %3, label %4, label %6
 
@@ -95,7 +98,7 @@ define i32 @join_2(i32, i8**) #0 {
 ;         %8 = %0 + 1                       %8 = %0 + 1
 ;         ret %8                            ret %8
 ;        -------------                     -------------
-; CHECK-LABEL: @join_3(
+; CHECK-LABEL: @join_4(
 ; CHECK:       br
 ; CHECK-NOT:   add
 ; CHECK:       br
@@ -104,7 +107,7 @@ define i32 @join_2(i32, i8**) #0 {
 ; CHECK-NOT:   phi
 ; CHECK:       add
 ; CHECK:       ret
-define i32 @join_3(i32, i8**) #0 {
+define i32 @join_4(i32, i8**) #0 {
   %3 = icmp ne i32 %0, 0
   br i1 %3, label %4, label %5
 
@@ -126,7 +129,7 @@ define i32 @join_3(i32, i8**) #0 {
 ;         %8 = %0 + 1                     %p = %phi(%5,%6)
 ;         ret %8                          ret %p
 ;        -------------                   -----------------
-; CHECK-LABEL: @join_3_partial_used(
+; CHECK-LABEL: @join_5(
 ; CHECK:       br
 ; CHECK:       add
 ; CHECK:       br
@@ -137,7 +140,7 @@ define i32 @join_3(i32, i8**) #0 {
 ; CHECK:       phi
 ; CHECK-NOT:   add
 ; CHECK:       ret
-define i64 @join_3_partial_used(i64, i8**) #0 {
+define i64 @join_5(i64, i8**) #0 {
   %3 = icmp ne i64 %0, 0
   br i1 %3, label %4, label %5
 
@@ -161,17 +164,18 @@ define i64 @join_3_partial_used(i64, i8**) #0 {
 ;         %8 = %0 + 1                     ret 0
 ;         ret 0                          -----------------
 ;        -------------
-; CHECK-LABEL: @join_3_partial_not_used(
+; CHECK-LABEL: @join_6(
 ; CHECK:       br
+; CHECK-NOT:   add
 ; CHECK:       br
 ; CHECK:       add
 ; CHECK:       inttoptr
 ; CHECK:       load
 ; CHECK:       br
-; CHECK-NOT:   add
 ; CHECK-NOT:   phi
+; CHECK-NOT:   add
 ; CHECK:       ret
-define i64 @join_3_partial_not_used(i64, i8**) #0 {
+define i64 @join_6(i64, i8**) #0 {
   %3 = icmp ne i64 %0, 0
   br i1 %3, label %4, label %5
 
