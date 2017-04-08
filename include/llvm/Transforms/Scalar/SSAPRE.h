@@ -590,7 +590,6 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
   // an Expression assumes existing Version it must define its Definition, so
   // that during kill time we could replace its use with a proper definition.
   DenseMap<Expression *, Expression *> Substitutions;
-  SmallVector<Instruction *, 32> RewireList;
   SmallVector<Instruction *, 32> KillList;
 
 public:

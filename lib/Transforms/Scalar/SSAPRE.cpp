@@ -365,7 +365,6 @@ ReplaceMatFactorWExpression(FactorExpression * FE, Expression * VE) {
   auto &Versions = PExprToVersions[PE][FE->getVersion()];
   for (auto V : Versions) {
     // auto I = VExprToInst[V];
-    // RewireList.push_back(I);
     Substitutions[V] = VE;
     VE->addSave();
   }
@@ -401,7 +400,6 @@ ReplaceFactorWExpression(FactorExpression * FE, Expression * VE) {
   auto &Versions = PExprToVersions[PE][FE->getVersion()];
   for (auto V : Versions) {
     // auto I = VExprToInst[V];
-    // RewireList.push_back(I);
     Substitutions[V] = VE;
     VE->addSave();
   }
@@ -667,11 +665,6 @@ IgnoreExpression(const Expression &E) {
 bool SSAPRE::
 IsRewiringOrKilling(Expression &E) {
   auto V = ExpToValue[&E];
-  for (auto R : RewireList) {
-    if (V == R)
-      return true;
-  }
-
   for (auto K : KillList) {
     if (V == K)
       return true;
@@ -971,7 +964,6 @@ Fini() {
   AvailDef.clear();
   BlockToInserts.clear();
   Substitutions.clear();
-  RewireList.clear();
   KillList.clear();
 }
 
@@ -2196,26 +2188,6 @@ CodeMotion() {
     }
   }
 
-  // Rewire marked instructions
-  // while (!RewireList.empty()) {
-  //   auto I = RewireList.pop_back_val();
-  //   if (I->hasNUsesOrMore(1)) {
-  //     auto DVE = GetSubstitution(InstToVExpr[I]);
-  //     auto DI = VExprToInst[DVE];
-  //
-  //     assert(I != DI && "Something went wrong");
-  //
-  //     // Increase DVE's Save count by the number of uses of the instruction
-  //     DVE->addSave(I->getNumUses());
-  //
-  //     I->replaceAllUsesWith(DI);
-  //   }
-  //
-  //   InstToVExpr[I]->setSave(0);
-  //   KillList.push_back(I);
-  //   Changed = true;
-  // }
-
   // Kill'em all
   // Before return we want to calculate effects of instruction deletion on the
   // other instructions. For example if we delete the last user of a value and
@@ -2252,7 +2224,6 @@ CodeMotion() {
     if (Proto)
       Proto->dropAllReferences();
   }
-
 
   // Remove instructions completely
   while (!KillList.empty()) {
