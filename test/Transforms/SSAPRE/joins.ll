@@ -134,8 +134,8 @@ define i32 @join_3(i32, i8**) #0 {
 ; CHECK:       inttoptr
 ; CHECK:       load
 ; CHECK:       br
-; CHECK-NOT:   add
 ; CHECK:       phi
+; CHECK-NOT:   add
 ; CHECK:       ret
 define i64 @join_3_partial_used(i64, i8**) #0 {
   %3 = icmp ne i64 %0, 0

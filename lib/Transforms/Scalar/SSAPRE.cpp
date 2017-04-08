@@ -1930,16 +1930,6 @@ bool SSAPRE::
 CodeMotion() {
   bool Changed = false;
 
-  // DenseMap<const Expression *, std::stack<std::pair<unsigned, Expression *>>>
-  //   PExprToVExprStack;
-  //
-  // for (auto &P : PExprToInsts) {
-  //   auto &PE = P.getFirst();
-  //   if (IgnoreExpression(*PE))
-  //     continue;
-  //   PExprToVExprStack.insert({PE, {}});
-  // }
-
   for (auto BS = JoinBlocks.rbegin(), BE = JoinBlocks.rend(); BS != BE; ++BS) {
     auto B = *BS;
     for (auto FE : BlockToFactors[B]) {
@@ -2035,12 +2025,6 @@ CodeMotion() {
 
   PrintDebug("CodeMotion.AfterJoinBlocks");
 
-  // Do Post Order traversal to propagate changes upwards
-  // for (po_iterator<BasicBlock *> BI = po_begin(&Func->getEntryBlock()),
-  //     IE = po_end(&Func->getEntryBlock()); BI != IE; ++BI) {
-  //   auto B = *BI;
-  // Since factors live outside basic blocks we set theirs DFS as the first
-  // instruction's in the block
   for (auto B : *RPOT) {
 
     // Insert Instructions
@@ -2066,20 +2050,55 @@ CodeMotion() {
         KillList.push_back(&I);
       }
     }
-
-    // For each terminator we need to visit every cfg successor of this block
-    // to update its Factor expressions
-    // for (auto S : B->getTerminator()->successors()) {
-    //   for (auto F : BlockToFactors[S]) {
-    //     auto &VEStack = PExprToVExprStack[F->getPExpr()];
-    //     size_t PI = F->getPredIndex(B);
-    //     assert(PI != -1UL && "Should not be the case");
-    //     F->setVExpr(PI, VEStack.empty() ? GetBottom() : VEStack.top().second);
-    //   }
-    // }
   }
 
-  PrintDebug("CodeMotion.BeforeRewiring");
+  PrintDebug("CodeMotion after RPOT pass");
+
+  // Insert PHIs for each available
+  for (auto &P : BlockToFactors) {
+    auto &B = P.getFirst();
+
+    // Check parameters of potential PHIs, they are either:
+    //  - Factor
+    //  - Saved Expression
+    for (auto F : P.getSecond()) {
+      // No PHI insertion for NotAwailable or Linked Factors
+      if (!F->getWillBeAvail() || F->getIsMaterialized()) continue;
+      bool hasFactors = false;
+      bool hasSaved = false;
+      bool hasDeleted = false;
+      for (auto &O : F->getVExprs()) {
+        if (FactorExpression::classof(O)) {
+          hasFactors = true;
+        } else {
+          hasSaved   |= O->getSave();
+          hasDeleted |= !O->getSave();
+        }
+      }
+
+      // Insert a PHI only if its operands are live
+      if (hasFactors || hasSaved) {
+        assert(!hasDeleted && "Must not be the case");
+        IRBuilder<> Builder((Instruction *)B->getFirstNonPHI());
+        auto BE = dyn_cast<BasicExpression>(F->getPExpr());
+        auto PHI = Builder.CreatePHI(BE->getType(), F->getVExprNum());
+        for (auto &VE : F->getVExprs()) {
+          while (VE != Substitutions[VE])
+            VE = Substitutions[VE];
+          auto I = VExprToInst[VE];
+          PHI->addIncoming(I, I->getParent());
+        }
+        // Make Factor Expression point to a real PHI
+        F->setIsMaterialized(true);
+        FactorToPHI[F] = PHI;
+        PHIToFactor[PHI] = F;
+        VExprToInst[F] = PHI;
+        Changed = true;
+      }
+    }
+  }
+
+  PrintDebug("CodeMotion after PHI insertion");
 
   // Apply Substitutions
   for (auto P : VExprToInst) {
@@ -2145,48 +2164,7 @@ CodeMotion() {
     KillList.push_back(VI);
   }
 
-  PrintDebug("CodeMotion.AfterRewiring");
-
-  // Insert PHIs for each available
-  for (auto &P : BlockToFactors) {
-    auto &B = P.getFirst();
-
-    // Check parameters of potential PHIs, they are either:
-    //  - Factor
-    //  - Saved Expression
-    for (auto F : P.getSecond()) {
-      // No PHI insertion for NotAwailable or Linked Factors
-      if (!F->getWillBeAvail() || F->getIsMaterialized()) continue;
-      bool hasFactors = false;
-      bool hasSaved = false;
-      bool hasDeleted = false;
-      for (auto &O : F->getVExprs()) {
-        if (FactorExpression::classof(O)) {
-          hasFactors = true;
-        } else {
-          hasSaved   |= O->getSave();
-          hasDeleted |= !O->getSave();
-        }
-      }
-
-      // Insert a PHI only if its operands are live
-      if (hasFactors || hasSaved) {
-        assert(!hasDeleted && "Must not be the case");
-        IRBuilder<> Builder((Instruction *)B->getFirstNonPHI());
-        auto BE = dyn_cast<BasicExpression>(F->getPExpr());
-        auto PHI = Builder.CreatePHI(BE->getType(), F->getVExprNum());
-        for (auto &VE : F->getVExprs()) {
-          while (VE != Substitutions[VE])
-            VE = Substitutions[VE];
-          auto I = VExprToInst[VE];
-          PHI->addIncoming(I, I->getParent());
-        }
-        // Make Factor Expression point to a real PHI
-        VExprToInst[F] = PHI;
-        Changed = true;
-      }
-    }
-  }
+  PrintDebug("CodeMotion after Substitutions");
 
   // Kill'em all
   // Before return we want to calculate effects of instruction deletion on the
