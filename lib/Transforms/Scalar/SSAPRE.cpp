@@ -1673,7 +1673,10 @@ Rename() {
         // ignore it.
         if (FVE == LF || FVE == F) continue;
 
-        if (LFVE != FVE) {
+        // The actual instances is of no use, since MFactor can cointain real
+        // expression the the other Factor may contain the MFactor as operand
+        // if those expressions never used
+        if (LFVE->getVersion() != FVE->getVersion()) {
           Same = false;
           break;
         }
@@ -1930,6 +1933,18 @@ bool SSAPRE::
 CodeMotion() {
   bool Changed = false;
 
+  // Insert Instructions
+  for (auto P : BlockToInserts) {
+    auto B = P.getFirst();
+    for (auto I : BlockToInserts[B]) {
+      IRBuilder<> Builder((Instruction *)B->getTerminator());
+      Builder.Insert(I);
+      Changed = true;
+    }
+  }
+
+  PrintDebug("CodeMotion Insertion");
+
   for (auto BS = JoinBlocks.rbegin(), BE = JoinBlocks.rend(); BS != BE; ++BS) {
     auto B = *BS;
     for (auto FE : BlockToFactors[B]) {
@@ -2023,16 +2038,9 @@ CodeMotion() {
     }
   }
 
-  PrintDebug("CodeMotion.AfterJoinBlocks");
+  PrintDebug("CodeMotion after JoinBlocks");
 
   for (auto B : *RPOT) {
-
-    // Insert Instructions
-    for (auto I : BlockToInserts[B]) {
-      IRBuilder<> Builder((Instruction *)B->getTerminator());
-      Builder.Insert(I);
-      Changed = true;
-    }
 
     for (auto &I : *B) {
       auto &VE = InstToVExpr[&I];
