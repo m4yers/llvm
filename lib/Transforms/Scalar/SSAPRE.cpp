@@ -309,6 +309,12 @@ GetSubstitution(Expression * E) {
 
 Value * SSAPRE::
 GetValue(Expression *E) {
+  if (auto F = dyn_cast<FactorExpression>(E)) {
+    if (F->getIsMaterialized())
+      return (Value *)FactorToPHI[F];
+    else
+      llvm_unreachable("nonononon");
+  }
   return (Value *)ExpToValue[GetSubstitution(E)];
 }
 
@@ -322,21 +328,25 @@ ReplaceMatFactorWExpression(FactorExpression * FE, Expression * VE) {
   VE->addSave(PHI->getNumUses());
   auto V = GetValue(VE);
   PHI->replaceAllUsesWith(V);
-  for (auto E : PExprToVExprs[PE]) {
-    if (auto BE = dyn_cast<BasicExpression>(E)) {
-      for (unsigned i = 0, l = BE->getNumOperands(); i < l; ++i) {
-        if (BE->getOperand(i) == PHI) {
-          BE->setOperand(i, V);
-        }
-      }
-    }
-  }
+
+  // for (auto E : PExprToVExprs[PE]) {
+  //   if (auto BE = dyn_cast<BasicExpression>(E)) {
+  //     for (unsigned i = 0, l = BE->getNumOperands(); i < l; ++i) {
+  //       if (BE->getOperand(i) == PHI) {
+  //         BE->setOperand(i, V);
+  //       }
+  //     }
+  //   }
+  // }
 
   // Replace all Factor uses
   for (auto F : FExprs) {
     for (unsigned i = 0, l = F->getVExprNum(); i < l; ++i) {
       if (F->getVExpr(i) == FE) {
         F->setVExpr(i, VE);
+        // If we assign the same version we create a cycle
+        if (F->getVersion() == VE->getVersion())
+          F->setIsCycle(true);
         // Add a save for yet not materialized Factor
         if (!F->getIsMaterialized() && F->getSave()) {
           VE->addSave();
@@ -354,10 +364,13 @@ ReplaceMatFactorWExpression(FactorExpression * FE, Expression * VE) {
   // with the this new expression
   auto &Versions = PExprToVersions[PE][FE->getVersion()];
   for (auto V : Versions) {
-    auto I = VExprToInst[V];
+    // auto I = VExprToInst[V];
+    // RewireList.push_back(I);
     Substitutions[V] = VE;
-    RewireList.push_back(I);
+    VE->addSave();
   }
+
+  Substitutions[FE] = VE;
 }
 
 void SSAPRE::
@@ -369,6 +382,9 @@ ReplaceFactorWExpression(FactorExpression * FE, Expression * VE) {
   for (auto F : FExprs) {
     for (unsigned i = 0, l = F->getVExprNum(); i < l; ++i) {
       if (F->getVExpr(i) == FE) {
+        // If we assign the same version we create a cycle
+        if (F->getVersion() == VE->getVersion())
+          F->setIsCycle(true);
         F->setVExpr(i, VE);
         VE->addSave();
       }
@@ -384,10 +400,13 @@ ReplaceFactorWExpression(FactorExpression * FE, Expression * VE) {
   auto PE = VExprToPExpr[VE];
   auto &Versions = PExprToVersions[PE][FE->getVersion()];
   for (auto V : Versions) {
-    auto I = VExprToInst[V];
+    // auto I = VExprToInst[V];
+    // RewireList.push_back(I);
     Substitutions[V] = VE;
-    RewireList.push_back(I);
+    VE->addSave();
   }
+
+  Substitutions[FE] = VE;
 }
 
 Expression *SSAPRE::
@@ -723,11 +742,41 @@ PrintDebug(const std::string &Caption) {
     dbgs() << "\n";
   }
 
-  dbgs() << "\nRewireList";
+  dbgs() << "\nSubstitutions";
   dbgs() << "\n---------------------------\n";
-  for (auto &K : RewireList) {
-    if (K->getParent()) {
-      K->print(dbgs());
+  for (auto &P : Substitutions) {
+    auto VE = P.getFirst();
+    auto VI = VExprToInst[VE];
+    auto SE = P.getSecond();
+    auto SI = VExprToInst[SE];
+
+    if (IgnoreExpression(*VE)) continue;
+
+    if (VI && !VI->getParent()) continue;
+
+    if (VI) {
+      VI->print(dbgs());
+    } else if (auto FE = dyn_cast<FactorExpression>(VE)) {
+      dbgs() << "  Factor V: " << FE->getVersion() << ", PE: " << FE->getPExpr();
+    } else if (VE == GetBottom()) {
+      continue;
+    } else {
+      llvm_unreachable("Must not be the case");
+    }
+
+    dbgs() << " -> ";
+    if (VE == SE) {
+      dbgs() << "-";
+    } else if (auto FE = dyn_cast<FactorExpression>(SE)) {
+      if (FE->getIsMaterialized() && FactorToPHI[FE]->getParent()) {
+        FactorToPHI[FE]->print(dbgs());
+      } else {
+      dbgs() << "Factor V: " << FE->getVersion() << ", PE: " << FE->getPExpr();
+      }
+    } else if (SE == GetBottom()) {
+      dbgs() << "⊥";
+    } else {
+      SI->print(dbgs());
     }
     dbgs() << "\n";
   }
@@ -755,6 +804,8 @@ Init(Function &F) {
     VAExpToValue[VAExp] = &A;
     ValueToVAExp[&A] = VAExp;
   }
+
+  Substitutions[GetBottom()] = GetBottom();
 
   // Each block starts its count from N millions, this will allow us add
   // instructions within wide DFS/SDFS range
@@ -1272,15 +1323,34 @@ FactorInsertion() {
       // later occurance(a DEF at this point) of the expression. A later
       // occurance will have a bigger DFS number;
       bool ShouldInsert = false;
-      // FIXME remove the cycle
-      for (auto &I : *B) {
-        auto OE = ValueToExp[&I];
-        auto OPE = VExprToPExpr[OE];
+      // FIXME improve this, no cycles...
 
-        // If Proto of the occurance matches the PE we should insert here
-        if (OPE == PE) {
-          ShouldInsert = true;
-          break;
+      SmallVector<BasicBlock *, 32> Queue;
+      DenseMap<BasicBlock *, bool> Visited;
+      Queue.push_back(B);
+      while (!Queue.empty()) {
+        auto BB = Queue.pop_back_val();
+
+        if (Visited.count(BB)) continue;
+
+        for (auto &I : *BB) {
+          auto OE = ValueToExp[&I];
+          auto OPE = VExprToPExpr[OE];
+
+          // If Proto of the occurance matches the PE we should insert here
+          if (OPE == PE) {
+            ShouldInsert = true;
+            break;
+          }
+        }
+
+        if (ShouldInsert) break;
+
+        Visited[BB] = true;
+
+        // Continue with the successors if none found
+        for (auto S : BB->getTerminator()->successors()) {
+          Queue.push_back(S);
         }
       }
 
@@ -1784,13 +1854,15 @@ FinalizeVisit(BasicBlock &B) {
       ADPE[V] = VE;
     // Or it was a Factor that for sure will be materialized, if not alredy
     // NOTE This wasn't in the paper, only real occurances force reload
-    } else if (auto F = dyn_cast<FactorExpression>(ADPE[V])) {
-      if (F->getWillBeAvail()) {
-        VE->setReload(true);
-      }
+    // } else if (auto F = dyn_cast<FactorExpression>(ADPE[V])) {
+    //   if (F->getWillBeAvail()) {
+    //     Substitutions[VE] = F;
+    //     VE->setReload(true);
+    //   }
     // Or it was a Real occurrence
     } else if (BasicExpression::classof(ADPE[V])) {
       ADPE[V]->addSave();
+      Substitutions[VE] = ADPE[V];
       VE->setReload(true);
     }
   }
@@ -1866,21 +1938,18 @@ bool SSAPRE::
 CodeMotion() {
   bool Changed = false;
 
-  DenseMap<const Expression *, std::stack<std::pair<unsigned, Expression *>>>
-    PExprToVExprStack;
+  // DenseMap<const Expression *, std::stack<std::pair<unsigned, Expression *>>>
+  //   PExprToVExprStack;
+  //
+  // for (auto &P : PExprToInsts) {
+  //   auto &PE = P.getFirst();
+  //   if (IgnoreExpression(*PE))
+  //     continue;
+  //   PExprToVExprStack.insert({PE, {}});
+  // }
 
-  for (auto &P : PExprToInsts) {
-    auto &PE = P.getFirst();
-    if (IgnoreExpression(*PE))
-      continue;
-    PExprToVExprStack.insert({PE, {}});
-  }
-
-  for (auto B : *RPOT) {
-    // Since factors live outside basic blocks we set theirs DFS as the first
-    // instruction's in the block
-    auto FSDFS = InstrSDFS[&B->front()];
-
+  for (auto BS = JoinBlocks.rbegin(), BE = JoinBlocks.rend(); BS != BE; ++BS) {
+    auto B = *BS;
     for (auto FE : BlockToFactors[B]) {
       auto PE = FE->getPExpr();
 
@@ -1897,18 +1966,18 @@ CodeMotion() {
         BasicBlock * PB = nullptr;
         for (unsigned i = 0, l = FE->getVExprNum(); i < l; ++i) {
           auto V = FE->getVExpr(i);
-          if (V->getVersion() != FE->getVersion()) {
-            VE = V;
-            PB = (BasicBlock *)FE->getPred(i);
-          } else {
+          if (V->getVersion() == FE->getVersion()) {
             CE = V;
             CI = i;
+          } else {
+            PB = (BasicBlock *)FE->getPred(i);
+            VE = V;
           }
         }
 
         // Cycled side is never used
         if (!FE->getHasRealUse(CI) && !FE->getDownSafe()) {
-          ReplaceFactorWExpression(FE, &BExpr);
+          ReplaceFactorWExpression(FE, GetBottom());
           auto PHI = (PHINode *)FactorToPHI[FE];
           assert(PHI->getNumUses() == 0 && "Should not be like that");
           KillList.push_back(PHI);
@@ -1959,17 +2028,28 @@ CodeMotion() {
           auto T = B->getFirstNonPHI();
           InstrDFS[I]  = InstrDFS[T];  InstrDFS[T]++;
           InstrSDFS[I] = InstrSDFS[T]; InstrSDFS[T]++;
-          I->insertBefore(T);
+          I->insertBefore((Instruction *)T);
 
           ReplaceMatFactorWExpression(FE, VE);
 
           // Otherwise we leave it be
         } else {
-          if (FE->getWillBeAvail())
-            PExprToVExprStack[PE].push({FSDFS, FE});
+          // if (FE->getWillBeAvail())
+          //   PExprToVExprStack[PE].push({FSDFS, FE});
         }
       }
     }
+  }
+
+  PrintDebug("CodeMotion.AfterJoinBlocks");
+
+  // Do Post Order traversal to propagate changes upwards
+  // for (po_iterator<BasicBlock *> BI = po_begin(&Func->getEntryBlock()),
+  //     IE = po_end(&Func->getEntryBlock()); BI != IE; ++BI) {
+  //   auto B = *BI;
+  // Since factors live outside basic blocks we set theirs DFS as the first
+  // instruction's in the block
+  for (auto B : *RPOT) {
 
     // Insert Instructions
     for (auto I : BlockToInserts[B]) {
@@ -1980,43 +2060,13 @@ CodeMotion() {
 
     for (auto &I : *B) {
       auto &VE = InstToVExpr[&I];
-      auto &PE = VExprToPExpr[VE];
+      // auto &PE = VExprToPExpr[VE];
 
       // Only looking at the real expression occurrances
       if (VE->getExpressionType() != ET_Basic)
         continue;
 
-      auto SDFS = InstrSDFS[&I];
-      auto &VEStack = PExprToVExprStack[PE];
-
-      // Backtrace every PExprs' stack if we jumped up the tree
-      for (auto &P : PExprToVExprStack) {
-        auto &VEStack = P.getSecond();
-        while (!VEStack.empty() && VEStack.top().first > SDFS) {
-          VEStack.pop();
-        }
-      }
-
-      if (IsRewiringOrKilling(*VE)) {
-        // Already processed
-      } else if (VE->getReload()) {
-        auto *VEStackTop = VEStack.empty() ? nullptr : VEStack.top().second;
-        assert(VEStackTop && "This must not be null");
-
-        // Replace usage
-        Substitutions[VE] = VEStackTop;
-        RewireList.push_back(&I);
-
-        // Update Factors
-        for (auto F : FExprs) {
-          auto VEI = F->getVExprIndex(*VE);
-          if (VEI != -1UL)
-            F->setVExpr(VEI, VEStackTop);
-        }
-      } else if (VE->getSave()) {
-        // Leave it be
-        VEStack.push({SDFS, VE});
-      } else {
+      if (!(IsRewiringOrKilling(*VE) || VE->getReload() || VE->getSave())) {
         for (auto U : I.users()) {
           assert(PHINode::classof(U) &&
               "This instructin must not have any uses except PHIs");
@@ -2027,15 +2077,83 @@ CodeMotion() {
 
     // For each terminator we need to visit every cfg successor of this block
     // to update its Factor expressions
-    for (auto S : B->getTerminator()->successors()) {
-      for (auto F : BlockToFactors[S]) {
-        auto &VEStack = PExprToVExprStack[F->getPExpr()];
-        size_t PI = F->getPredIndex(B);
-        assert(PI != -1UL && "Should not be the case");
-        F->setVExpr(PI, VEStack.empty() ? GetBottom() : VEStack.top().second);
+    // for (auto S : B->getTerminator()->successors()) {
+    //   for (auto F : BlockToFactors[S]) {
+    //     auto &VEStack = PExprToVExprStack[F->getPExpr()];
+    //     size_t PI = F->getPredIndex(B);
+    //     assert(PI != -1UL && "Should not be the case");
+    //     F->setVExpr(PI, VEStack.empty() ? GetBottom() : VEStack.top().second);
+    //   }
+    // }
+  }
+
+  PrintDebug("CodeMotion.BeforeRewiring");
+
+  // Apply Substitutions
+  for (auto P : VExprToInst) {
+    auto VE = (Expression *)P.getFirst();
+
+    if (IgnoreExpression(*VE)) continue;
+    if (IsRewiringOrKilling(*VE)) continue;
+
+    Instruction * VI = nullptr;
+    if (auto FE = dyn_cast<FactorExpression>(VE)) {
+      if (auto PHI = FactorToPHI[FE]) {
+        VI = (Instruction *)PHI;
+      } else {
+        // assert(FE == Substitutions[FE] && "I don't think so");
+        // This is just jump record
+        continue;
+      }
+    } else {
+      VI = VExprToInst[VE];
+    }
+    auto SE = GetSubstitution(VE);
+
+    if (VE == SE) continue;
+
+    // ??? Not sure about this
+    // ??? We could use two values Top and Bottom to distinguish between values
+    // ??? to remain and to be removed
+    if (auto FE = dyn_cast<FactorExpression>(SE)) {
+      if (!FE->getIsMaterialized()) continue;
+    }
+
+    // The value is not used at all
+    if (SE == GetBottom()) {
+      assert(VI->getNumUses() == 0);
+      KillList.push_back(VI);
+      continue;
+    }
+
+    // If the Substitution is Bottom and it is not in the kill list add it there
+    if (SE == GetBottom() && !IsRewiringOrKilling(*VE)) {
+      // assert(VI->getNumUses() == 0);
+      KillList.push_back(VI);
+      continue;
+    }
+
+    auto SI = GetValue(SE);
+    assert(VI != SI && "Something went wrong");
+
+    VE->clrSave();
+
+    // We add Save only for the existing instruction. Instructions such as
+    // Protos do not exist in the function's body but still have uses on other
+    // definitions
+    for (auto U : VI->users()) {
+      if (((Instruction *)U)->getParent()) {
+        SE->addSave();
       }
     }
+
+    VI->replaceAllUsesWith(SI);
+    Changed = true;
+
+    KillList.push_back(VI);
   }
+
+  PrintDebug("CodeMotion.AfterRewiring");
 
   // Insert PHIs for each available
   for (auto &P : BlockToFactors) {
@@ -2079,26 +2197,24 @@ CodeMotion() {
   }
 
   // Rewire marked instructions
-  while (!RewireList.empty()) {
-    auto I = RewireList.pop_back_val();
-    if (I->hasNUsesOrMore(1)) {
-      auto *Def = Substitutions[InstToVExpr[I]];
-      while (Def != Substitutions[Def]) {
-        Def = Substitutions[Def];
-      }
-
-      assert(I != VExprToInst[Def] && "Something went wrong");
-
-      // Increase Def's Save count by the number of uses of the instruction
-      Def->addSave(I->getNumUses());
-
-      I->replaceAllUsesWith(VExprToInst[Def]);
-    }
-
-    InstToVExpr[I]->setSave(0);
-    KillList.push_back(I);
-    Changed = true;
-  }
+  // while (!RewireList.empty()) {
+  //   auto I = RewireList.pop_back_val();
+  //   if (I->hasNUsesOrMore(1)) {
+  //     auto DVE = GetSubstitution(InstToVExpr[I]);
+  //     auto DI = VExprToInst[DVE];
+  //
+  //     assert(I != DI && "Something went wrong");
+  //
+  //     // Increase DVE's Save count by the number of uses of the instruction
+  //     DVE->addSave(I->getNumUses());
+  //
+  //     I->replaceAllUsesWith(DI);
+  //   }
+  //
+  //   InstToVExpr[I]->setSave(0);
+  //   KillList.push_back(I);
+  //   Changed = true;
+  // }
 
   // Kill'em all
   // Before return we want to calculate effects of instruction deletion on the
@@ -2161,6 +2277,7 @@ runImpl(Function &F,
   DL = &F.getParent()->getDataLayout();
   AC = &_AC;
   DT = &_DT;
+  Func = &F;
 
   NumFuncArgs = F.arg_size();
 

@@ -103,6 +103,7 @@ define i32 @join_2(i32, i8**) #0 {
 ; CHECK:       br
 ; CHECK-NOT:   phi
 ; CHECK:       add
+; CHECK:       ret
 define i32 @join_3(i32, i8**) #0 {
   %3 = icmp ne i32 %0, 0
   br i1 %3, label %4, label %5

@@ -519,6 +519,7 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
   const TargetLibraryInfo *TLI;
   AssumptionCache *AC;
   DominatorTree *DT;
+  Function *Func;
   ReversePostOrderTraversal<Function *> *RPOT;
 
   typedef std::pair<unsigned, Expression *> UIntExpressionPair_t;
