@@ -1975,9 +1975,10 @@ CodeMotion() {
         // Cycled side is never used
         if (!FE->getHasRealUse(CI) && !FE->getDownSafe()) {
           ReplaceFactorWExpression(FE, GetBottom());
-          auto PHI = (PHINode *)FactorToPHI[FE];
-          assert(PHI->getNumUses() == 0 && "Should not be like that");
-          KillList.push_back(PHI);
+          if (auto PHI = (PHINode *)FactorToPHI[FE]) {
+            assert(PHI->getNumUses() == 0 && "Should not be like that");
+            KillList.push_back(PHI);
+          }
           continue;
         }
 
