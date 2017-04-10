@@ -392,23 +392,36 @@ void SSAPRE::
 MaterializeFactor(FactorExpression *FE, PHINode *PHI) {
   assert(FE && PHI);
 
+  FE->setIsMaterialized(true);
+
+  // This may not exist if we just materialized the phi
   auto PHIE = InstToVExpr[PHI];
+  if (PHIE) {
+    Substitutions.erase(PHIE);
+
+    // Erase all memory of it
+    ExpToValue.erase(PHIE);
+    VExprToInst.erase(PHIE);
+    VExprToPExpr.erase(PHIE);
+
+    delete PHIE;
+  }
+
+  // This may not exist if we just materialized the phi
   auto PPHI = VExprToPExpr[PHIE];
+  if (PPHI) {
+    // We need to remove anything related to this PHIs original prototype,
+    // because before we verified that this PHI is actually a Factor it was based
+    // on its own PHI proto instance.
+    PExprToVExprs.erase(PPHI);
+    PExprToInsts.erase(PPHI);
+    PExprToBlocks.erase(PPHI);
+    PExprToVersions.erase(PPHI);
 
-  Substitutions.erase(PHIE);
-
-  // Erase all memory of it
-  ExpToValue.erase(PHIE);
-  VExprToInst.erase(PHIE);
-  VExprToPExpr.erase(PHIE);
-
-  // We need to remove anything related to this PHIs original prototype,
-  // because before we verified that this PHI is actually a Factor it was based
-  // on its own PHI proto instance.
-  PExprToVExprs.erase(PPHI);
-  PExprToInsts.erase(PPHI);
-  PExprToBlocks.erase(PPHI);
-  PExprToVersions.erase(PPHI);
+    // FIXME proper memeroy clean up
+    PPHI->getProto()->dropAllReferences();
+    delete PPHI;
+  }
 
   // Wire FE to PHI
   FactorToPHI[FE] = PHI;
@@ -420,13 +433,6 @@ MaterializeFactor(FactorExpression *FE, PHINode *PHI) {
 
   ExpToValue[FE] = PHI;
   ValueToExp[PHI] = FE;
-
-  FE->setIsMaterialized(true);
-
-  // FIXME proper memeroy clean up
-  PPHI->getProto()->dropAllReferences();
-  delete PPHI;
-  delete PHIE;
 }
 
 void SSAPRE::
@@ -2054,6 +2060,7 @@ CodeMotion() {
       I->insertBefore(T);
       Changed = true;
     }
+    BlockToInserts.erase(B);
   }
 
   PrintDebug("CodeMotion after Insertion");
@@ -2176,21 +2183,21 @@ CodeMotion() {
     for (auto F : P.getSecond()) {
       // No PHI insertion for NotAwailable or Linked Factors
       if (!F->getWillBeAvail() || F->getIsMaterialized()) continue;
-      bool hasFactors = false;
-      bool hasSaved = false;
-      bool hasDeleted = false;
-      for (auto &O : F->getVExprs()) {
-        if (FactorExpression::classof(O)) {
-          hasFactors = true;
-        } else {
-          hasSaved   |= O->getSave();
-          hasDeleted |= !O->getSave();
-        }
-      }
+      // bool hasFactors = false;
+      // bool hasSaved = false;
+      // bool hasDeleted = false;
+      // for (auto &O : F->getVExprs()) {
+      //   if (FactorExpression::classof(O)) {
+      //     hasFactors = true;
+      //   } else {
+      //     hasSaved   |= O->getSave();
+      //     hasDeleted |= !O->getSave();
+      //   }
+      // }
 
       // Insert a PHI only if its operands are live
-      if (hasFactors || hasSaved) {
-        assert(!hasDeleted && "Must not be the case");
+      // if (hasFactors || hasSaved) {
+        // assert(!hasDeleted && "Must not be the case");
         IRBuilder<> Builder((Instruction *)B->getFirstNonPHI());
         auto BE = dyn_cast<BasicExpression>(F->getPExpr());
         auto PHI = Builder.CreatePHI(BE->getType(), F->getVExprNum());
@@ -2207,7 +2214,7 @@ CodeMotion() {
         // Make Factor Expression point to a real PHI
         MaterializeFactor(F, PHI);
         Changed = true;
-      }
+      // }
     }
   }
 
