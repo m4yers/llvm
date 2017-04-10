@@ -107,6 +107,7 @@ public:
 
   int getReload() const { return Reload; }
   void setReload(int R) { Reload = R; }
+  void clrReload() { Reload = false; }
 
   static unsigned getEmptyKey() { return ~0U; }
   static unsigned getTombstoneKey() { return ~1U; }
@@ -426,7 +427,7 @@ public:
   size_t getVExprNum() const { return Versions.size(); }
   void setVExpr(unsigned P, Expression * V) { Versions[P] = V; }
   Expression * getVExpr(unsigned P) const { return Versions[P]; }
-  size_t getVExprIndex(Expression &V) {
+  size_t getVExprIndex(Expression &V) const  {
     for(size_t i = 0, l = Versions.size(); i < l; ++i) {
       if (Versions[i] == &V)
         return i;
@@ -434,7 +435,7 @@ public:
     return -1;
   }
 
-  bool hasVExpr(Expression &V) {
+  bool hasVExpr(Expression &V) const {
     return getVExprIndex(V) != -1UL;
   }
 
@@ -461,6 +462,7 @@ public:
 
   void setHasRealUse(unsigned P, bool HRU) { HasRealUse[P] = HRU; }
   bool getHasRealUse(unsigned P) const { return HasRealUse[P]; }
+  bool getHasRealUse(Expression &E) const { return HasRealUse[getVExprIndex(E)]; }
 
   static bool classof(const Expression *EB) {
     return EB->getExpressionType() == ET_Factor;
@@ -644,10 +646,18 @@ private:
                         const BBVector_t &P,
                         const Expression *E);
 
-  void KillFactor(FactorExpression *);
+  void KillFactor(FactorExpression *, bool UpdateOperands = true);
+
+  void AddVExpr(Expression *PE, Expression *VE, Instruction *I, BasicBlock *B,
+                bool ToBeInserted = false);
+
+  void MaterializeFactor(FactorExpression *FE, PHINode *PHI);
+
+  void SetOrderBefore(Instruction *I, Instruction *B);
 
   // Go through all the Substitutions of the Expression and return the most
   // recent one
+  void AddSubstitution(Expression * E, Expression * S);
   Expression * GetSubstitution(Expression * E);
 
   // Go through all the substitutions of the Expression and return the most
@@ -673,7 +683,9 @@ private:
   Expression * CreateExpression(Instruction &I);
 
   bool IgnoreExpression(const Expression &E);
-  bool IsRewiringOrKilling(Expression &E);
+  bool IsToBeKilled(Expression &E);
+  bool IsToBeAdded(Instruction *I);
+  bool AreAllUsersKilled(const Instruction *I);
 
   void PrintDebug(const std::string &Caption);
 
