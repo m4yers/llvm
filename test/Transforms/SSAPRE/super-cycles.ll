@@ -101,3 +101,34 @@ define i64 @super_cycle_3(i64, i8**) #0 {
 
   ret i64 %.0
 }
+
+; CHECK-LABEL: @super_cycle_4(
+; CHECK:       br
+; CHECK:       br
+; CHECK:       br
+; CHECK:       br
+; CHECK:       br
+; CHECK:       br
+; CHECK:       br
+; CHECK:       add
+; CHECK:       ret
+define i32 @super_cycle_4(i32, i8**) #0 {
+  br label %3
+
+  br i1 false, label %4, label %10
+
+  %5 = add nsw i32 %0, 1
+  br label %6
+
+  br i1 false, label %7, label %9
+
+  %8 = add nsw i32 %0, 1
+  br label %11
+
+  br label %3
+
+  br label %11
+
+  %.0 = phi i32 [ %8, %7 ], [ 0, %10 ]
+  ret i32 %.0
+}

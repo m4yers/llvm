@@ -592,6 +592,11 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
   // an Expression assumes existing Version it must define its Definition, so
   // that during kill time we could replace its use with a proper definition.
   DenseMap<Expression *, Expression *> Substitutions;
+
+  // Store all the PHIs that are considered to be Factors at any point in the
+  // pass. Useful during kill time to separate ordinal and factored phis, since
+  // former do save their operands, but later do not.
+  DenseMap<PHINode *, bool> FactoredPHIs;
   SmallVector<Instruction *, 32> KillList;
 
 public:
@@ -654,6 +659,7 @@ private:
   void MaterializeFactor(FactorExpression *FE, PHINode *PHI);
 
   void SetOrderBefore(Instruction *I, Instruction *B);
+  void SetOperandSave(Instruction *I);
 
   // Go through all the Substitutions of the Expression and return the most
   // recent one
