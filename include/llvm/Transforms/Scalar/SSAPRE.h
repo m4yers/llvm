@@ -29,7 +29,10 @@ namespace llvm {
 namespace ssapre LLVM_LIBRARY_VISIBILITY {
 
 class SSAPRELegacy;
+
+namespace phi_factoring {
 class TokenPropagationSolver;
+}
 
 
 //===----------------------------------------------------------------------===//
@@ -67,11 +70,24 @@ inline std::string ExpressionTypeToString(ExpressionType ET) {
   }
 }
 
+// During debug it is useful to have distinct versions for stuff
+typedef int ExpVersion_t;
+enum VersionRanges : ExpVersion_t {
+  VR_Unset = -1,
+  VR_Bottom = -2,
+  VR_VariableLo = -1000,
+  VR_VariableHi = -1999,
+  VR_ConstantLo = -2000,
+  VR_ConstantHi = -2900,
+  VR_IgnoredLo  = -3000,
+  VR_IgnoredHi  = -9999,
+};
+
 class Expression {
 private:
   ExpressionType EType;
   unsigned Opcode;
-  int Version;
+  ExpVersion_t Version;
 
   Instruction *Proto;
 
@@ -80,20 +96,20 @@ private:
 
 public:
   Expression(ExpressionType ET = ET_Base, unsigned O = ~2U,
-             int V = -1000)
+             ExpVersion_t V = VR_Unset)
       : EType(ET), Opcode(O), Version(V),
         Proto(nullptr),
         Saved(0), Reload(false) {}
-  // Expression(const Expression &) = delete;
-  // Expression &operator=(const Expression &) = delete;
+  Expression(const Expression &) = delete;
+  Expression &operator=(const Expression &) = delete;
   virtual ~Expression();
 
   unsigned getOpcode() const { return Opcode; }
   void setOpcode(unsigned opcode) { Opcode = opcode; }
   ExpressionType getExpressionType() const { return EType; }
 
-  int getVersion() const { return Version; }
-  void setVersion(int V) { Version = V; }
+  ExpVersion_t getVersion() const { return Version; }
+  void setVersion(ExpVersion_t V) { Version = V; }
 
   Instruction * getProto() const { return Proto; }
   void setProto(Instruction *I) { Proto = I; }
@@ -202,7 +218,8 @@ private:
   Value &VariableValue;
 
 public:
-  VariableExpression(Value &V) : Expression(ET_Variable), VariableValue(V) {}
+  VariableExpression(Value &V)
+    : Expression(ET_Variable), VariableValue(V) {}
   VariableExpression() = delete;
   VariableExpression(const VariableExpression &) = delete;
   VariableExpression &operator=(const VariableExpression &) = delete;
@@ -425,8 +442,17 @@ public:
   }
 
   size_t getVExprNum() const { return Versions.size(); }
+
   void setVExpr(unsigned P, Expression * V) { Versions[P] = V; }
+  void setVExpr(BasicBlock *B, Expression * V) { Versions[Pred[B]] = V; }
+
+  void replaceVExpr(Expression *E, Expression *V) {
+    Versions[getVExprIndex(E)] = V;
+  }
+
   Expression * getVExpr(unsigned P) const { return Versions[P]; }
+  Expression * getVExpr(BasicBlock *B) const { return Versions[Pred.lookup(B)]; }
+
   size_t getVExprIndex(Expression &V) const  {
     for(size_t i = 0, l = Versions.size(); i < l; ++i) {
       if (Versions[i] == &V)
@@ -435,7 +461,19 @@ public:
     return -1;
   }
 
+  size_t getVExprIndex(Expression *V) const  {
+    for(size_t i = 0, l = Versions.size(); i < l; ++i) {
+      if (Versions[i] == V)
+        return i;
+    }
+    return -1;
+  }
+
   bool hasVExpr(Expression &V) const {
+    return getVExprIndex(V) != -1UL;
+  }
+
+  bool hasVExpr(Expression *V) const {
     return getVExprIndex(V) != -1UL;
   }
 
@@ -463,6 +501,8 @@ public:
   void setHasRealUse(unsigned P, bool HRU) { HasRealUse[P] = HRU; }
   bool getHasRealUse(unsigned P) const { return HasRealUse[P]; }
   bool getHasRealUse(Expression &E) const { return HasRealUse[getVExprIndex(E)]; }
+  bool getHasRealUse(Expression *E) const { return HasRealUse[getVExprIndex(E)]; }
+  void setHasRealUse(Expression *E, bool HRU) { HasRealUse[getVExprIndex(E)] = HRU; }
 
   static bool classof(const Expression *EB) {
     return EB->getExpressionType() == ET_Factor;
@@ -489,7 +529,7 @@ public:
       if (Versions[i]) {
         OS << Versions[i]->getVersion();
       } else {
-        OS << "⊥";
+        OS << "×";
       }
       if (i + 1 != l) OS << ",";
     }
@@ -514,6 +554,10 @@ using namespace ssapre;
 
 typedef SmallVector<BasicBlock *, 32> BBVector_t;
 typedef SmallVector<FactorExpression *, 32> FEVector_t;
+typedef std::pair<unsigned, Expression *> UIntExpressionPair_t;
+typedef std::stack<UIntExpressionPair_t> ExprStack_t;
+typedef SmallVector<Expression *, 32> ExpVector_t;
+typedef DenseMap<const Expression *, ExprStack_t> PExprToVExprStack_t;
 
 /// Performs SSA PRE pass.
 class SSAPRE : public PassInfoMixin<SSAPRE> {
@@ -524,9 +568,9 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
   Function *Func;
   ReversePostOrderTraversal<Function *> *RPOT;
 
-  typedef std::pair<unsigned, Expression *> UIntExpressionPair_t;
-  typedef std::stack<UIntExpressionPair_t> ExprStack_t;
-  typedef DenseMap<const Expression *, ExprStack_t> PExprToVExprStack_t;
+  ExpVersion_t LastVariableVersion;
+  ExpVersion_t LastConstantVersion;
+  ExpVersion_t LastIgnoredVersion;
 
   SmallVector<const BasicBlock *, 32> JoinBlocks;
 
@@ -568,8 +612,7 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
   // ProtoExpression-to-VersionedExpressions
   DenseMap<const Expression *, SmallPtrSet<Expression *, 5>> PExprToVExprs;
 
-  typedef SmallVector<Expression *, 32> ExprVector_t;
-  DenseMap<const Expression *, DenseMap<unsigned, ExprVector_t>> PExprToVersions;
+  DenseMap<const Expression *, DenseMap<int,ExpVector_t>> PExprToVersions;
 
   // ProtoExpression-to-BasicBlock map
   DenseMap<const Expression *, SmallPtrSet<BasicBlock *, 5>> PExprToBlocks;
@@ -604,96 +647,99 @@ public:
 
 private:
   friend ssapre::SSAPRELegacy;
-  friend ssapre::TokenPropagationSolver;
+  friend ssapre::phi_factoring::TokenPropagationSolver;
 
-  std::pair<unsigned, unsigned> AssignDFSNumbers(BasicBlock *B, unsigned Start,
-                                                 InstrToOrderType *M,
-                                                 OrderedInstrType *V);
+  // Return a reference to the vector containing all Expressions that share
+  // the same version with F, by definition those occur after the F
+  ExpVector_t & GetFactorVersions(const FactorExpression *F);
+
+  // Return a reference to the vector containing all Expressions that share
+  // the same version with E, these versions may occur before or after E
+  ExpVector_t & GetExpVersions(const Expression *E);
+
+  // Check whether an Expression is a ⊥ value. It can be not only a real bottom
+  // value but a constant or a variable since they do not provide a computation
+  bool IsBottom(const Expression *E);
+
+  bool IsVariableOrConstant(const Expression *E);
+  bool IsFactoredPHI(Instruction *I);
+
+  // Not Strictly implies Def == Use -> True
+  bool NotStrictlyDominates(const Expression *Def, const Expression *Use);
+
+  // Check whether Expression operands' definitions dominate the Factor
+  bool OperandsDominate(const Expression *E, const FactorExpression *F);
+
+  // Find out whether Expression versions are used on a Path before(including)
+  // another Expression occurance
+  bool HasRealUseBefore(const Expression *S, const BBVector_t &P,
+                        const Expression *E);
+
+  // Find out whether Factor(its versions) is used on a Path before(including)
+  // another Expression occurance
+  bool FactorHasRealUseBefore(const FactorExpression *F, const BBVector_t &P,
+                              const Expression *E);
+
+  bool IgnoreExpression(const Expression *E);
+  bool IsToBeKilled(Expression *E);
+  bool IsToBeAdded(Instruction *I);
+  bool AllUsersKilled(const Instruction *I);
+
+  void SetOrderBefore(Instruction *I, Instruction *B);
+  void SetAllOperandsSave(Instruction *I);
+  void AddSubstitution(Expression * E, Expression * S);
+
+  // Go through all the Substitutions of the Expression and return the most
+  // recent one
+  Expression * GetSubstitution(Expression * E);
+
+  // Go through all the substitutions of the Expression and return the most
+  // recent value available
+  Value * GetSubstituteValue(Expression * E);
+
+  void AddConstant(ConstantExpression *CE, Constant *C);
+  void AddExpression(Expression *PE, Expression *VE, Instruction *I,
+                     BasicBlock *B, bool ToBeInserted = false);
+
+  void AddFactor(FactorExpression *FE, const Expression *PE, const BasicBlock *B);
+  void KillFactor(FactorExpression *);
+  void MaterializeFactor(FactorExpression *FE, PHINode *PHI);
+  void ReplaceFactor(FactorExpression * FE, Expression * E);
+  void ReplaceMaterializedFactor(FactorExpression * FE, Expression * E);
 
   // This function provides global ranking of operations so that we can place
   // them in a canonical order.  Note that rank alone is not necessarily enough
   // for a complete ordering, as constants all have the same rank.  However,
   // generally, we will simplify an operation with all constants so that it
   // doesn't matter what order they appear in.
-  unsigned int GetRank(const Value *V) const;
+  unsigned GetRank(const Value *V) const;
 
   // This is a function that says whether two commutative operations should
   // have their order swapped when canonicalizing.
   bool ShouldSwapOperands(const Value *A, const Value *B) const;
 
-  bool VariableOrConstant(const Expression & E);
-
   bool FillInBasicExpressionInfo(Instruction &I, BasicExpression *E);
 
-  // Not Strictly implies Def == Use -> True
-  bool NotStrictlyDominates(const Expression *Def, const Expression *Use);
-
-  // Check whether Expression operands' definitions dominate the Factor
-  bool OperandsDominate(const PExprToVExprStack_t &, const Expression *E,
-                        const FactorExpression *F);
-
-  Expression * GetBottom();
-
-  // Check whether an Expression is a ⊥ value. It can be not only a real bottom
-  // value but a constant or a variable since they do not provide a computation
-  bool IsBottom(const Expression &E);
-
-  // ??? Remove it?
-  bool FactorHasRealUse(const FactorExpression *F);
-
-  // Find out whether Factor(its versions) is used on a Path before(including)
-  // another Expression occurance
-  bool FactorHasRealUseBefore(const FactorExpression *F,
-                              const BBVector_t &P,
-                              const Expression *E);
-
-  bool HasRealUseBefore(const Expression *S,
-                        const BBVector_t &P,
-                        const Expression *E);
-
-  void KillFactor(FactorExpression *, bool UpdateOperands = true);
-
-  void AddVExpr(Expression *PE, Expression *VE, Instruction *I, BasicBlock *B,
-                bool ToBeInserted = false);
-
-  void MaterializeFactor(FactorExpression *FE, PHINode *PHI);
-
-  void SetOrderBefore(Instruction *I, Instruction *B);
-  void SetOperandSave(Instruction *I);
-
-  // Go through all the Substitutions of the Expression and return the most
-  // recent one
-  void AddSubstitution(Expression * E, Expression * S);
-  Expression * GetSubstitution(Expression * E);
-
-  // Go through all the substitutions of the Expression and return the most
-  // recent value available
-  Value * GetValue(Expression * E);
-
-  void ReplaceMatFactorWExpression(FactorExpression * FE, Expression * E);
-  void ReplaceFactorWExpression(FactorExpression * FE, Expression * E);
+  std::pair<unsigned, unsigned>
+  AssignDFSNumbers(BasicBlock *B, unsigned Start, InstrToOrderType *M,
+                   OrderedInstrType *V);
 
   // Take a Value returned by simplification of Expression E/Instruction I, and
   // see if it resulted in a simpler expression. If so, return that expression.
-  Expression * CheckSimplificationResults(Expression *E,
-                                          Instruction &I,
-                                          Value *V);
+  Expression *
+  CheckSimplificationResults(Expression *E, Instruction &I, Value *V);
+
   ConstantExpression * CreateConstantExpression(Constant &C);
   VariableExpression * CreateVariableExpression(Value &V);
   Expression * CreateIgnoredExpression(Instruction &I);
   Expression * CreateUnknownExpression(Instruction &I);
   Expression * CreateBasicExpression(Instruction &I);
   Expression * CreatePHIExpression(PHINode &I);
-  FactorExpression * CreateFactorExpression(const Expression &E,
-                                            const BasicBlock &B);
+
+  FactorExpression *
+  CreateFactorExpression(const Expression &E, const BasicBlock &B);
+
   Expression * CreateExpression(Instruction &I);
-
-  bool IgnoreExpression(const Expression &E);
-  bool IsToBeKilled(Expression &E);
-  bool IsToBeAdded(Instruction *I);
-  bool AreAllUsersKilled(const Instruction *I);
-
-  void PrintDebug(const std::string &Caption);
 
   void Init(Function &F);
   void Fini();
@@ -702,22 +748,25 @@ private:
 
   void Rename();
 
-  void ResetDownSafety(FactorExpression &F, unsigned O);
+  void ResetDownSafety(FactorExpression *F, Expression *E);
   void DownSafety();
 
   void ComputeCanBeAvail();
-  void ResetCanBeAvail(FactorExpression &F);
+  void ResetCanBeAvail(FactorExpression *F);
   void ComputeLater();
-  void ResetLater(FactorExpression &F);
+  void ResetLater(FactorExpression *F);
   void WillBeAvail();
 
-  void FinalizeVisit(BasicBlock &B);
+  void FinalizeVisit(BasicBlock *B);
   void Finalize();
 
   bool CodeMotion();
 
-  PreservedAnalyses runImpl(Function &F, AssumptionCache &_AC,
-                            TargetLibraryInfo &_TLI, DominatorTree &_DT);
+  void PrintDebug(const std::string &Caption);
+
+  PreservedAnalyses
+  runImpl(Function &F, AssumptionCache &_AC, TargetLibraryInfo &_TLI,
+          DominatorTree &_DT);
 };
 } // end namespace llvm
 
