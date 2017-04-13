@@ -474,9 +474,9 @@ ReplaceFactor(FactorExpression *FE, Expression *VE) {
   // in case of already materialized not-removed during CodeMotion step.
   for (auto F : FExprs) {
     if (F == FE) continue;
-    for (unsigned i = 0, l = F->getVExprNum(); i < l; ++i) {
-      if (F->getVExpr(i) == FE) {
-        F->setVExpr(i, VE);
+    for (auto BB : F->getPreds()) {
+      if (F->getVExpr(BB) == FE) {
+        F->setVExpr(BB, VE);
 
         // If we assign the same version we create a cycle
         if (F->getVersion() == VE->getVersion())
@@ -1730,9 +1730,10 @@ Rename() {
       if (F->getIsMaterialized() || LF == F) continue;
 
       bool Same = true;
-      for (unsigned i = 0, l = LF->getVExprNum(); i < l; ++i) {
-        auto LFVE = LF->getVExpr(i);
-        auto FVE = F->getVExpr(i);
+      for (auto BB : F->getPreds()) {
+        auto LFVE = LF->getVExpr(BB);
+        auto FVE = F->getVExpr(BB);
+
         // NOTE
         // Kinda a special case, while assigning versioned expressions to a
         // Factor we cannot infer that a variable or a constant is coming from
@@ -1971,7 +1972,7 @@ FactorGraphWalk() {
         Expression * VE = nullptr;
         // The source of the incomming Expression
         BasicBlock * PB = nullptr;
-        for (auto P : FE->GetPreds()) {
+        for (auto P : FE->getPreds()) {
           auto V = FE->getVExpr(P);
           if (V->getVersion() == FE->getVersion()) {
             CE = V;
@@ -2022,7 +2023,7 @@ FactorGraphWalk() {
         // already have their operands set
         if (FE->getWillBeAvail() && !FE->getIsCycle() && !FE->getIsMaterialized()) {
           auto PE = (Expression *)FE->getPExpr();
-          for (auto BB : FE->GetPreds()) {
+          for (auto BB : FE->getPreds()) {
             auto O = FE->getVExpr(BB);
             // Satisfies insert if either:
             //   - Version(O) is ⊥

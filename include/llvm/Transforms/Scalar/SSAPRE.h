@@ -436,34 +436,21 @@ public:
     Versions.push_back(nullptr);
     HasRealUse.push_back(false);
   }
-  const BasicBlock * getPred(size_t I) const { return Indices.lookup(I); }
-  size_t getPredIndex(BasicBlock * B) const {
-    assert(Pred.count(B) && "Should not be the case");
-    return Pred.lookup(B);
-  }
 
-  const SmallPtrSet<BasicBlock *, 4> &GetPreds() { return Blocks; }
+  const SmallPtrSet<BasicBlock *, 4> &getPreds() { return Blocks; }
 
-  size_t getVExprNum() const { return Versions.size(); }
-
-  void setVExpr(unsigned P, Expression * V) { Versions[P] = V; }
   void setVExpr(BasicBlock *B, Expression * V) { Versions[Pred[B]] = V; }
 
   void replaceVExpr(Expression *E, Expression *V) {
+    assert(hasVExpr(E));
     Versions[getVExprIndex(E)] = V;
   }
 
-  Expression * getVExpr(unsigned P) const { return Versions[P]; }
+  bool hasVExpr(Expression *V) const { return getVExprIndex(V) != -1UL; } 
+  SmallVector<Expression *, 8> getVExprs() { return Versions; };
   Expression * getVExpr(BasicBlock *B) const { return Versions[Pred.lookup(B)]; }
 
-  size_t getVExprIndex(Expression &V) const  {
-    for(size_t i = 0, l = Versions.size(); i < l; ++i) {
-      if (Versions[i] == &V)
-        return i;
-    }
-    return -1;
-  }
-
+  size_t getVExprNum() const { return Versions.size(); }
   size_t getVExprIndex(Expression *V) const  {
     for(size_t i = 0, l = Versions.size(); i < l; ++i) {
       if (Versions[i] == V)
@@ -471,16 +458,6 @@ public:
     }
     return -1;
   }
-
-  bool hasVExpr(Expression &V) const {
-    return getVExprIndex(V) != -1UL;
-  }
-
-  bool hasVExpr(Expression *V) const {
-    return getVExprIndex(V) != -1UL;
-  }
-
-  SmallVector<Expression *, 8> getVExprs() { return Versions; };
 
   bool getDownSafe() const { return DownSafe; }
   void setDownSafe(bool DS) { DownSafe = DS; }
@@ -501,9 +478,6 @@ public:
   // the Factor is already materialized into a PHI and this PHI is used.  bool
   // getIsAvail() const { return CanBeAvail && Materialized; }
 
-  void setHasRealUse(unsigned P, bool HRU) { HasRealUse[P] = HRU; }
-  bool getHasRealUse(unsigned P) const { return HasRealUse[P]; }
-  bool getHasRealUse(Expression &E) const { return HasRealUse[getVExprIndex(E)]; }
   bool getHasRealUse(Expression *E) const { return HasRealUse[getVExprIndex(E)]; }
   void setHasRealUse(Expression *E, bool HRU) { HasRealUse[getVExprIndex(E)] = HRU; }
 
