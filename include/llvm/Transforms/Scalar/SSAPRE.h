@@ -22,6 +22,7 @@
 #include "llvm/IR/Dominators.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/Support/ArrayRecycler.h"
+#include "llvm/Support/Allocator.h"
 #include <stack>
 
 namespace llvm {
@@ -267,8 +268,6 @@ public:
 
 class BasicExpression : public Expression {
 private:
-  // typedef ArrayRecycler<Value *> RecyclerType;
-  // typedef RecyclerType::Capacity RecyclerCapacity;
   SmallVector<Value *, 2> Operands; // TODO use Expressions here
   Type *ValueType;
 
@@ -571,6 +570,8 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
   DominatorTree *DT;
   Function *Func;
   ReversePostOrderTraversal<Function *> *RPOT;
+
+  BumpPtrAllocator ExpressionAllocator;
 
   ExpVersion_t LastVariableVersion;
   ExpVersion_t LastConstantVersion;

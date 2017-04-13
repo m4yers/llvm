@@ -436,7 +436,7 @@ MaterializeFactor(FactorExpression *FE, PHINode *PHI) {
 
     // FIXME proper memeroy clean up
     PPE->getProto()->dropAllReferences();
-    delete PPE;
+    ExpressionAllocator.Deallocate(PPE);
   }
 
   if (PVE) {
@@ -447,7 +447,7 @@ MaterializeFactor(FactorExpression *FE, PHINode *PHI) {
     VExprToInst.erase(PVE);
     VExprToPExpr.erase(PVE);
 
-    delete PVE;
+    ExpressionAllocator.Deallocate(PVE);
   }
 
   // Wire FE to PHI
@@ -637,17 +637,13 @@ CheckSimplificationResults(Expression *E, Instruction &I, Value *V) {
     assert(isa<BasicExpression>(E) &&
            "We should always have had a basic expression here");
 
-    // cast<BasicExpression>(E)->deallocateOperands(ArgRecycler);
-    // ExpressionAllocator.Deallocate(E);
-    // return CreateConstantExpression(*C);
     // FIXME ignore contants for now
+    ExpressionAllocator.Deallocate(E);
     return CreateIgnoredExpression(I);
   } else if (isa<Argument>(V) || isa<GlobalVariable>(V)) {
     DEBUG(dbgs() << "Simplified " << I << " to "
                  << " variable " << *V << "\n");
-    // cast<BasicExpression>(E)->deallocateOperands(ArgRecycler);
-    // ExpressionAllocator.Deallocate(E);
-    // FIXME proper allocation
+    ExpressionAllocator.Deallocate(E);
     return CreateVariableExpression(*V);
   }
 
@@ -656,7 +652,7 @@ CheckSimplificationResults(Expression *E, Instruction &I, Value *V) {
 
 ConstantExpression *SSAPRE::
 CreateConstantExpression(Constant &C) {
-  auto *E = new ConstantExpression(C);
+  auto *E = new (ExpressionAllocator) ConstantExpression(C);
   E->setOpcode(C.getValueID());
   E->setVersion(LastConstantVersion--);
   return E;
@@ -664,7 +660,7 @@ CreateConstantExpression(Constant &C) {
 
 VariableExpression *SSAPRE::
 CreateVariableExpression(Value &V) {
-  auto *E = new VariableExpression(V);
+  auto *E = new (ExpressionAllocator) VariableExpression(V);
   E->setOpcode(V.getValueID());
   E->setVersion(LastVariableVersion--);
   return E;
@@ -672,8 +668,7 @@ CreateVariableExpression(Value &V) {
 
 Expression * SSAPRE::
 CreateIgnoredExpression(Instruction &I) {
-  // auto *E = new (ExpressionAllocator) UnknownExpression(I);
-  auto *E = new IgnoredExpression(&I);
+  auto *E = new (ExpressionAllocator) IgnoredExpression(&I);
   E->setOpcode(I.getOpcode());
   E->setVersion(LastIgnoredVersion--);
   return E;
@@ -681,8 +676,7 @@ CreateIgnoredExpression(Instruction &I) {
 
 Expression * SSAPRE::
 CreateUnknownExpression(Instruction &I) {
-  // auto *E = new (ExpressionAllocator) UnknownExpression(I);
-  auto *E = new UnknownExpression(&I);
+  auto *E = new (ExpressionAllocator) UnknownExpression(&I);
   E->setOpcode(I.getOpcode());
   E->setVersion(LastIgnoredVersion--);
   return E;
@@ -690,8 +684,7 @@ CreateUnknownExpression(Instruction &I) {
 
 Expression * SSAPRE::
 CreateBasicExpression(Instruction &I) {
-  // auto *E = new (ExpressionAllocator) BasicExpression(I->getNumOperands());
-  auto *E = new BasicExpression();
+  auto *E = new (ExpressionAllocator) BasicExpression();
 
   bool AllConstant = FillInBasicExpressionInfo(I, E);
 
@@ -779,14 +772,14 @@ CreateBasicExpression(Instruction &I) {
 
 Expression *SSAPRE::
 CreatePHIExpression(PHINode &I) {
-  auto *E = new PHIExpression(I.getParent());
+  auto *E = new (ExpressionAllocator) PHIExpression(I.getParent());
   FillInBasicExpressionInfo(I, E);
   return E;
 }
 
 FactorExpression *SSAPRE::
 CreateFactorExpression(const Expression &PE, const BasicBlock &B) {
-  auto FE = new FactorExpression(B);
+  auto FE = new (ExpressionAllocator) FactorExpression(B);
   size_t C = 0;
 
   // The order we add these blocks is not important, since these blocks only
@@ -889,154 +882,154 @@ CreateExpression(Instruction &I) {
 namespace llvm {
 namespace ssapre {
 namespace phi_factoring {
-  typedef const Expression * Token_t;
+typedef const Expression * Token_t;
 
-  // This structure encode an assumption that a SRC PHI is an operand of DST
-  // PHI, the second operand of which is TOK.
-  struct PropDst_t {
-    Token_t TOK;
-    const PHINode * DST;
+// This structure encode an assumption that a SRC PHI is an operand of DST
+// PHI, the second operand of which is TOK.
+struct PropDst_t {
+  Token_t TOK;
+  const PHINode * DST;
 
-    PropDst_t() = delete;
-    PropDst_t(Token_t TOK, const PHINode *DST)
-      : TOK(TOK), DST(DST) {}
-  };
+  PropDst_t() = delete;
+  PropDst_t(Token_t TOK, const PHINode *DST)
+    : TOK(TOK), DST(DST) {}
+};
 
-  Token_t GetTop() { return (Expression *)0x704; }
-  Token_t GetBot() { return (Expression *)0x807; }
-  bool IsTop(Token_t T) { return T == GetTop(); }
-  bool IsBot(Token_t T) { return T == GetBot(); }
-  bool IsTopOrBottom(Token_t T) { return IsTop(T) || IsBot(T); }
+Token_t GetTop() { return (Expression *)0x704; }
+Token_t GetBot() { return (Expression *)0x807; }
+bool IsTop(Token_t T) { return T == GetTop(); }
+bool IsBot(Token_t T) { return T == GetBot(); }
+bool IsTopOrBottom(Token_t T) { return IsTop(T) || IsBot(T); }
 
-  // Rules:
-  //   T    ^ T    = T      Exp  ^ T    = Exp
-  //   Exp  ^ Exp  = Exp    ExpX ^ ExpY = F
-  //   Exp  ^ F    = F      F    ^ T    = F
-  //   F    ^ F    = F
-  Token_t
-  CalculateToken(Token_t A, Token_t B) {
-    // T    ^ T    = T
-    // Exp  ^ Exp  = Exp
-    // F    ^ F    = F
-    if (A == B) {
-      return A;
-    }
+// Rules:
+//   T    ^ T    = T      Exp  ^ T    = Exp
+//   Exp  ^ Exp  = Exp    ExpX ^ ExpY = F
+//   Exp  ^ F    = F      F    ^ T    = F
+//   F    ^ F    = F
+Token_t
+CalculateToken(Token_t A, Token_t B) {
+  // T    ^ T    = T
+  // Exp  ^ Exp  = Exp
+  // F    ^ F    = F
+  if (A == B) {
+    return A;
+  }
 
-    // Exp  ^ T    = Exp
-    if (IsTop(A) && !IsTopOrBottom(B)) {
-      return B;
-    } else if (!IsTopOrBottom(A) && IsTop(B)) {
-      return A;
-    }
+  // Exp  ^ T    = Exp
+  if (IsTop(A) && !IsTopOrBottom(B)) {
+    return B;
+  } else if (!IsTopOrBottom(A) && IsTop(B)) {
+    return A;
+  }
 
-    // Exp  ^ F    = F
-    if (IsBot(A) && !IsTopOrBottom(B)) {
-      return GetBot();
-    } else if (!IsTopOrBottom(A) && IsBot(B)) {
-      return GetBot();
-    }
-
-    // ExpX ^ ExpY = F
-    // F    ^ T    = F
+  // Exp  ^ F    = F
+  if (IsBot(A) && !IsTopOrBottom(B)) {
+    return GetBot();
+  } else if (!IsTopOrBottom(A) && IsBot(B)) {
     return GetBot();
   }
 
-  typedef DenseMap<const PHINode *, const FactorExpression *> PHIFactorMap_t;
-  typedef DenseMap<const PHINode *, Token_t> PHITokenMap_t;
-  typedef SmallVector<PropDst_t, 8> PropDstVector_t;
-  typedef DenseMap<const PHINode *, PropDstVector_t> SrcPropMap_t;
-  typedef DenseMap<const PHINode *, bool> SrcKillMap_t;
-  typedef SmallVector<const PHINode *, 8> PHIVector_t;
+  // ExpX ^ ExpY = F
+  // F    ^ T    = F
+  return GetBot();
+}
 
-  class TokenPropagationSolver {
-    SSAPRE &O;
-    PHIFactorMap_t PHIFactorMap;
-    PHITokenMap_t PHITokenMap;
-    SrcPropMap_t SrcPropMap;
-    SrcKillMap_t SrcKillMap;
+typedef DenseMap<const PHINode *, const FactorExpression *> PHIFactorMap_t;
+typedef DenseMap<const PHINode *, Token_t> PHITokenMap_t;
+typedef SmallVector<PropDst_t, 8> PropDstVector_t;
+typedef DenseMap<const PHINode *, PropDstVector_t> SrcPropMap_t;
+typedef DenseMap<const PHINode *, bool> SrcKillMap_t;
+typedef SmallVector<const PHINode *, 8> PHIVector_t;
 
-  public:
-    TokenPropagationSolver() = delete;
-    TokenPropagationSolver(SSAPRE &O) : O(O) {}
+class TokenPropagationSolver {
+  SSAPRE &O;
+  PHIFactorMap_t PHIFactorMap;
+  PHITokenMap_t PHITokenMap;
+  SrcPropMap_t SrcPropMap;
+  SrcKillMap_t SrcKillMap;
 
-    void
-    CreateFactor(const PHINode *PHI, Token_t PE) {
-      auto E = PHIFactorMap[PHI];
-      assert(!E && "FE already exist");
-      E = O.CreateFactorExpression(*PE, *PHI->getParent());
-      PHIFactorMap[PHI] = E;
-      SrcKillMap[PHI] = false;
-    }
+public:
+  TokenPropagationSolver() = delete;
+  TokenPropagationSolver(SSAPRE &O) : O(O) {}
 
-    bool
-    HasTokenFor(const PHINode *PHI) {
-      return PHITokenMap.count(PHI) != 0;
-    }
+  void
+  CreateFactor(const PHINode *PHI, Token_t PE) {
+    auto E = PHIFactorMap[PHI];
+    assert(!E && "FE already exist");
+    E = O.CreateFactorExpression(*PE, *PHI->getParent());
+    PHIFactorMap[PHI] = E;
+    SrcKillMap[PHI] = false;
+  }
 
-    Token_t
-    GetTokenFor(const PHINode *PHI) {
-      assert(HasTokenFor(PHI) && "Well...");
-      return PHITokenMap[PHI];
-    }
+  bool
+  HasTokenFor(const PHINode *PHI) {
+    return PHITokenMap.count(PHI) != 0;
+  }
 
-    bool
-    HasFactorFor(const PHINode *PHI) {
-      return PHIFactorMap.count(PHI) != 0;
-    }
+  Token_t
+  GetTokenFor(const PHINode *PHI) {
+    assert(HasTokenFor(PHI) && "Well...");
+    return PHITokenMap[PHI];
+  }
 
-    const FactorExpression *
-    GetFactorFor(const PHINode *PHI) {
-      assert(HasFactorFor(PHI));
-      return PHIFactorMap[PHI];
-    }
+  bool
+  HasFactorFor(const PHINode *PHI) {
+    return PHIFactorMap.count(PHI) != 0;
+  }
 
-    PHIFactorMap_t
-    GetLiveFactors() {
-      // Erase all killed Factors before returning the Map
-      for (auto P : SrcKillMap) {
-        if (P.getSecond()) {
-          // FIXME proper FE deletion here
-          PHIFactorMap.erase(P.getFirst());
-        }
-      }
-      return PHIFactorMap;
-    }
+  const FactorExpression *
+  GetFactorFor(const PHINode *PHI) {
+    assert(HasFactorFor(PHI));
+    return PHIFactorMap[PHI];
+  }
 
-    void
-    AddPropagations(Token_t T, const PHINode *S, PHIVector_t DL) {
-      for (auto D : DL) { AddPropagation(T, S, D); }
-    }
-
-    void
-    AddPropagation(Token_t T, const PHINode *S, const PHINode *D) {
-      if (!HasFactorFor(S)) CreateFactor(S, T);
-      if (!HasFactorFor(D)) CreateFactor(D, T);
-
-      if (!SrcPropMap.count(S)) {
-        SrcPropMap.insert({S, {{T, D}}});
-      } else {
-        SrcPropMap[S].push_back({T, D});
+  PHIFactorMap_t
+  GetLiveFactors() {
+    // Erase all killed Factors before returning the Map
+    for (auto P : SrcKillMap) {
+      if (P.getSecond()) {
+        O.ExpressionAllocator.Deallocate(P.getFirst());
+        PHIFactorMap.erase(P.getFirst());
       }
     }
+    return PHIFactorMap;
+  }
 
-    void
-    FinishPropagation(Token_t T, const PHINode *PHI) {
-      assert(!SrcKillMap[PHI] && "The Factor is already killed");
+  void
+  AddPropagations(Token_t T, const PHINode *S, PHIVector_t DL) {
+    for (auto D : DL) { AddPropagation(T, S, D); }
+  }
 
-      PHITokenMap.insert({PHI, T});
+  void
+  AddPropagation(Token_t T, const PHINode *S, const PHINode *D) {
+    if (!HasFactorFor(S)) CreateFactor(S, T);
+    if (!HasFactorFor(D)) CreateFactor(D, T);
 
-      // Either Top or Bottom results in deletion of the Factor
-      if (IsTopOrBottom(T)) {
-        SrcKillMap[PHI] = true;
-      }
-
-      // Recursively finish every propagation
-      for (auto &PD : SrcPropMap[PHI]) {
-        auto R = CalculateToken(T, PD.TOK);
-        FinishPropagation(R, PD.DST);
-      }
+    if (!SrcPropMap.count(S)) {
+      SrcPropMap.insert({S, {{T, D}}});
+    } else {
+      SrcPropMap[S].push_back({T, D});
     }
-  };
+  }
+
+  void
+  FinishPropagation(Token_t T, const PHINode *PHI) {
+    assert(!SrcKillMap[PHI] && "The Factor is already killed");
+
+    PHITokenMap.insert({PHI, T});
+
+    // Either Top or Bottom results in deletion of the Factor
+    if (IsTopOrBottom(T)) {
+      SrcKillMap[PHI] = true;
+    }
+
+    // Recursively finish every propagation
+    for (auto &PD : SrcPropMap[PHI]) {
+      auto R = CalculateToken(T, PD.TOK);
+      FinishPropagation(R, PD.DST);
+    }
+  }
+};
 } // namespace phi_factoring
 } // namespace ssapre
 } // namespace llvm
@@ -1201,6 +1194,8 @@ Fini() {
 
   Substitutions.clear();
   KillList.clear();
+
+  ExpressionAllocator.Reset();
 }
 
 void SSAPRE::
@@ -1924,8 +1919,8 @@ FinalizeVisit(BasicBlock *B) {
     auto DEF = AvailDef[PE][V];
 
     // If there was no expression occurrence before, or it was an expression's
-    // operand definition, or the previous expression does not strictly dominate
-    // the current occurrence we update the record
+    // operand definition, or the previous expression does not strictly
+    // dominate the current occurrence we update the record
     if (!DEF || IsBottom(DEF) || !NotStrictlyDominates(DEF, VE)) {
       ADPE[V] = VE;
 
