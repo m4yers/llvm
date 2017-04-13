@@ -1957,10 +1957,10 @@ Finalize() {
 }
 
 bool SSAPRE::
-CodeMotion() {
+FactorGraphWalk() {
   bool Changed = false;
 
-  // Initial Factors bottom-up processing
+  // bottom-up processing
   for (auto BS = JoinBlocks.rbegin(), BE = JoinBlocks.rend(); BS != BE; ++BS) {
     auto B = (BasicBlock *)*BS;
     for (auto FE : BlockToFactors[B]) {
@@ -1995,6 +1995,7 @@ CodeMotion() {
           }
 
           ReplaceFactor(FE, GetBottom());
+          Changed = true;
 
           continue;
         }
@@ -2017,6 +2018,9 @@ CodeMotion() {
         } else {
           ReplaceFactor(FE, VE);
         }
+
+        Changed = true;
+
       } else {
         // The Factor must be available and must not be cycled since those are
         // processed differently, and must not be materialized because those
@@ -2045,6 +2049,8 @@ CodeMotion() {
             }
           }
 
+          Changed = true;
+
         // If Mat and Later this Factor is useless and we replace it with a real
         // computation
         } else if (FE->getIsMaterialized() && FE->getLater()) {
@@ -2058,6 +2064,8 @@ CodeMotion() {
           I->insertBefore((Instruction *)T);
 
           ReplaceMaterializedFactor(FE, VE);
+
+          Changed = true;
 
         // This PHI/Factor stays after all so we need to save all its
         // operands
@@ -2074,10 +2082,13 @@ CodeMotion() {
     }
   }
 
+  return Changed;
+}
 
-  PrintDebug("CodeMotion after Factors bottom-up walk");
+bool SSAPRE::
+PHIInsertion() {
+  bool Changed = false;
 
-  // Insert PHIs for each available
   for (auto &P : BlockToFactors) {
     auto &B = P.getFirst();
 
@@ -2114,9 +2125,13 @@ CodeMotion() {
     }
   }
 
-  PrintDebug("CodeMotion after PHI insertion");
+  return Changed;
+}
 
-  // Apply Substitutions
+bool SSAPRE::
+ApplySubstitutions() {
+  bool Changed = false;
+
   for (auto P : VExprToInst) {
     if (!P.getFirst() || !P.getSecond()) {
       // llvm_unreachable("Why is this happening?");
@@ -2177,7 +2192,12 @@ CodeMotion() {
     Changed = true;
   }
 
-  PrintDebug("CodeMotion after Substitutions");
+  return Changed;
+}
+
+bool SSAPRE::
+KillEmAll() {
+  bool Changed = false;
 
   // Kill'em all
   // Before return we want to calculate effects of instruction deletion on the
@@ -2223,6 +2243,25 @@ CodeMotion() {
     K->eraseFromParent();
     Changed = true;
   }
+
+  return Changed;
+}
+
+bool SSAPRE::
+CodeMotion() {
+  bool Changed = false;
+
+  Changed |= FactorGraphWalk();
+  PrintDebug("CodeMotion.FactorGraphWalk");
+
+  Changed |= PHIInsertion();
+  PrintDebug("CodeMotion.PHIInsertion");
+
+  Changed |= ApplySubstitutions();
+  PrintDebug("CodeMotion.ApplySubstitutions");
+
+  Changed |= KillEmAll();
+  // PrintDebug("CodeMotion.KillEmAll");
 
   return Changed;
 }

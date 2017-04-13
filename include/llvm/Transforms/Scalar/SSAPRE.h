@@ -760,6 +760,10 @@ private:
   void FinalizeVisit(BasicBlock *B);
   void Finalize();
 
+  bool FactorGraphWalk();
+  bool PHIInsertion();
+  bool ApplySubstitutions();
+  bool KillEmAll();
   bool CodeMotion();
 
   void PrintDebug(const std::string &Caption);
