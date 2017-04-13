@@ -376,8 +376,9 @@ private:
   const Expression *PE;
 
   // This maps BB to Index inside Versions and HRU
-  DenseMap<const BasicBlock *, size_t> Pred;
-  DenseMap<size_t, const BasicBlock *> Indices;
+  SmallPtrSet<BasicBlock *, 4> Blocks;
+  DenseMap<BasicBlock *, size_t> Pred;
+  DenseMap<size_t, BasicBlock *> Indices;
 
   // The Versioned Expressions that this Factor joins
   SmallVector<Expression *, 8> Versions;
@@ -429,17 +430,20 @@ public:
   void setPExpr(const Expression *E) { PE = E; }
   const Expression* getPExpr() const { return PE; }
 
-  void addPred(const BasicBlock *B, size_t I) {
+  void addPred(BasicBlock *B, size_t I) {
     Pred[B] = I;
     Indices[I] = B;
+    Blocks.insert(B);
     Versions.push_back(nullptr);
     HasRealUse.push_back(false);
   }
   const BasicBlock * getPred(size_t I) const { return Indices.lookup(I); }
-  size_t getPredIndex(const BasicBlock * B) const {
+  size_t getPredIndex(BasicBlock * B) const {
     assert(Pred.count(B) && "Should not be the case");
     return Pred.lookup(B);
   }
+
+  const SmallPtrSet<BasicBlock *, 4> &GetPreds() { return Blocks; }
 
   size_t getVExprNum() const { return Versions.size(); }
 
@@ -626,10 +630,6 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
 
   SmallPtrSet<FactorExpression *, 32> FExprs;
 
-  DenseMap<const Expression *, DenseMap<int, Expression *>> AvailDef;
-
-  DenseMap<const BasicBlock *, SmallVector<Instruction *, 5>> BlockToInserts;
-
   // This map contains 1-to-1 correspondence between Expression Occurrence and
   // its Definition. Upon initialization Keys will be equal to Values, once
   // an Expression assumes existing Version it must define its Definition, so
@@ -682,7 +682,7 @@ private:
 
   bool IgnoreExpression(const Expression *E);
   bool IsToBeKilled(Expression *E);
-  bool IsToBeAdded(Instruction *I);
+  bool IsToBeKilled(Instruction *I);
   bool AllUsersKilled(const Instruction *I);
 
   void SetOrderBefore(Instruction *I, Instruction *B);
@@ -699,7 +699,7 @@ private:
 
   void AddConstant(ConstantExpression *CE, Constant *C);
   void AddExpression(Expression *PE, Expression *VE, Instruction *I,
-                     BasicBlock *B, bool ToBeInserted = false);
+                     BasicBlock *B);
 
   void AddFactor(FactorExpression *FE, const Expression *PE, const BasicBlock *B);
   void KillFactor(FactorExpression *);
