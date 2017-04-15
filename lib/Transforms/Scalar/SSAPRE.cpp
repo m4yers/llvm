@@ -1640,7 +1640,7 @@ Rename() {
         bool SameVersions = true;
         auto VEBE = dyn_cast<BasicExpression>(VE);
         auto VEStackTopBE = dyn_cast<BasicExpression>(VEStackTop);
-        for (unsigned i = 0, l = VEBE->getNumOperands(); i < l; ++l) {
+        for (unsigned i = 0, l = VEBE->getNumOperands(); i < l; ++i) {
           if (ValueToExp[VEBE->getOperand(i)]->getVersion() !=
               ValueToExp[VEStackTopBE->getOperand(i)]->getVersion()) {
             SameVersions = false;
