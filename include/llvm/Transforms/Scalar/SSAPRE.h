@@ -446,7 +446,7 @@ public:
     Versions[getVExprIndex(E)] = V;
   }
 
-  bool hasVExpr(Expression *V) const { return getVExprIndex(V) != -1UL; } 
+  bool hasVExpr(Expression *V) const { return getVExprIndex(V) != -1UL; }
   SmallVector<Expression *, 8> getVExprs() { return Versions; };
   Expression * getVExpr(BasicBlock *B) const { return Versions[Pred.lookup(B)]; }
 

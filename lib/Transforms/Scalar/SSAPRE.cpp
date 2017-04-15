@@ -434,7 +434,6 @@ MaterializeFactor(FactorExpression *FE, PHINode *PHI) {
     PExprToBlocks.erase(PPE);
     PExprToVersions.erase(PPE);
 
-    // FIXME proper memeroy clean up
     PPE->getProto()->dropAllReferences();
     ExpressionAllocator.Deallocate(PPE);
   }
@@ -1158,7 +1157,6 @@ Init(Function &F) {
   }
 }
 
-// FIXME Do proper memory management
 void SSAPRE::
 Fini() {
   JoinBlocks.clear();
@@ -1293,7 +1291,7 @@ FactorInsertion() {
           TokSolver.FinishPropagation(TOK, PHI);
 
         // Or if the result is an Expression we just create a new Factor
-        } else if (!IsTopOrBottom(TOK)) {
+        } else if (!IsTopOrBottom(TOK) && !IgnoreExpression(TOK)) {
           auto F = CreateFactorExpression(*TOK, *B);
 
           AddFactor(F, TOK, B);
@@ -1316,6 +1314,8 @@ FactorInsertion() {
     auto B = PHI->getParent();
     auto F = (FactorExpression *)P.getSecond();
     auto T = TokSolver.GetTokenFor(PHI);
+
+    if (IgnoreExpression(T)) continue;
 
     // Set already know expression versions
     for (unsigned i = 0, l = PHI->getNumOperands(); i < l; ++i) {
