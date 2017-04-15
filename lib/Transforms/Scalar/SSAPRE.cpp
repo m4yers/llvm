@@ -894,11 +894,11 @@ struct PropDst_t {
     : TOK(TOK), DST(DST) {}
 };
 
-Token_t GetTop() { return (Expression *)0x704; }
-Token_t GetBot() { return (Expression *)0x807; }
-bool IsTop(Token_t T) { return T == GetTop(); }
-bool IsBot(Token_t T) { return T == GetBot(); }
-bool IsTopOrBottom(Token_t T) { return IsTop(T) || IsBot(T); }
+Token_t GetTopTok() { return (Expression *)0x704; }
+Token_t GetBotTok() { return (Expression *)0x807; }
+bool IsTopTok(Token_t T) { return T == GetTopTok(); }
+bool IsBotTok(Token_t T) { return T == GetBotTok(); }
+bool IsTopOrBottomTok(Token_t T) { return IsTopTok(T) || IsBotTok(T); }
 
 // Rules:
 //   T    ^ T    = T      Exp  ^ T    = Exp
@@ -915,22 +915,22 @@ CalculateToken(Token_t A, Token_t B) {
   }
 
   // Exp  ^ T    = Exp
-  if (IsTop(A) && !IsTopOrBottom(B)) {
+  if (IsTopTok(A) && !IsTopOrBottomTok(B)) {
     return B;
-  } else if (!IsTopOrBottom(A) && IsTop(B)) {
+  } else if (!IsTopOrBottomTok(A) && IsTopTok(B)) {
     return A;
   }
 
   // Exp  ^ F    = F
-  if (IsBot(A) && !IsTopOrBottom(B)) {
-    return GetBot();
-  } else if (!IsTopOrBottom(A) && IsBot(B)) {
-    return GetBot();
+  if (IsBotTok(A) && !IsTopOrBottomTok(B)) {
+    return GetBotTok();
+  } else if (!IsTopOrBottomTok(A) && IsBotTok(B)) {
+    return GetBotTok();
   }
 
   // ExpX ^ ExpY = F
   // F    ^ T    = F
-  return GetBot();
+  return GetBotTok();
 }
 
 typedef DenseMap<const PHINode *, const FactorExpression *> PHIFactorMap_t;
@@ -1018,7 +1018,7 @@ public:
     PHITokenMap.insert({PHI, T});
 
     // Either Top or Bottom results in deletion of the Factor
-    if (IsTopOrBottom(T)) {
+    if (IsTopOrBottomTok(T)) {
       SrcKillMap[PHI] = true;
     }
 
@@ -1213,7 +1213,7 @@ FactorInsertion() {
 
       // Token is a meet of all the PHI's operands. We optimistically set it
       // initially to Top
-      Token_t TOK = GetTop();
+      Token_t TOK = GetTopTok();
 
       // Back Branch source
       const PHINode * BackBranch = nullptr;
@@ -1223,7 +1223,7 @@ FactorInsertion() {
 
         // A variable or a constant regarded as Top value
         if (IsVariableOrConstant(OVE)) {
-          TOK = CalculateToken(TOK, GetTop());
+          TOK = CalculateToken(TOK, GetTopTok());
           continue;
         }
 
@@ -1239,7 +1239,7 @@ FactorInsertion() {
             // either Expression with the same PE or Constant or Variable or
             // Nothing in this case it is a success; or we encounter Expression
             // with different PE, this is a failure case.
-            TOK = CalculateToken(TOK, GetTop());
+            TOK = CalculateToken(TOK, GetTopTok());
             assert(!BackBranch && "Must not be a second Back Branch");
             BackBranch = OPHI;
             continue;
@@ -1256,12 +1256,12 @@ FactorInsertion() {
             // is Bottom
             Token_t T = TokSolver.HasTokenFor(OPHI)
                           ? TokSolver.GetTokenFor(OPHI)
-                          : GetTop();
+                          : GetTopTok();
             TOK = CalculateToken(TOK, T);
 
           // Otherwise it is Bottom
           } else {
-            TOK = CalculateToken(TOK, GetBottom());
+            TOK = CalculateToken(TOK, GetBotTok());
           }
           continue;
         // Otherwise we use whatever this VE is prototyped by
@@ -1276,7 +1276,7 @@ FactorInsertion() {
       if (BackBranch) {
 
         // It is not a materialized Factor for sure
-        if (IsBot(TOK)) break;
+        if (IsBotTok(TOK)) break;
 
         // Now we have either an Expression or Top value to propagate
         // upwards. We get/create Factors for current PHI and its cycle PHI
@@ -1291,7 +1291,7 @@ FactorInsertion() {
           TokSolver.FinishPropagation(TOK, PHI);
 
         // Or if the result is an Expression we just create a new Factor
-        } else if (!IsTopOrBottom(TOK) && !IgnoreExpression(TOK)) {
+        } else if (!IsTopOrBottomTok(TOK) && !IgnoreExpression(TOK)) {
           auto F = CreateFactorExpression(*TOK, *B);
 
           AddFactor(F, TOK, B);
