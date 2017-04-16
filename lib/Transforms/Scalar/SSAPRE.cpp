@@ -138,8 +138,8 @@ NotStrictlyDominates(const Expression *Def, const Expression *Use) {
 }
 
 bool SSAPRE::
-OperandsDominate(const Expression *Exp, const FactorExpression *Factor) {
-  for (auto &O : VExprToInst[Exp]->operands()) {
+OperandsDominate(const Expression *Def, const Expression *Use) {
+  for (auto &O : VExprToInst[Def]->operands()) {
     auto E = ValueToExp[O];
 
     // Variables or Constants occurs indefinitely before any expression
@@ -150,7 +150,7 @@ OperandsDominate(const Expression *Exp, const FactorExpression *Factor) {
     // version.
     E = GetSubstitution(E);
 
-    if (!NotStrictlyDominates(E, Factor)) return false;
+    if (!NotStrictlyDominates(E, Use)) return false;
   }
 
   return true;
@@ -1218,12 +1218,30 @@ FactorInsertion() {
       // Back Branch source
       const PHINode * BackBranch = nullptr;
 
-      for (auto &Op : PHI->operands()) {
+      BasicBlock * TopMostBottomBlock = nullptr;
+      SmallPtrSet<Expression *, 4> NonBottomArgs;
+
+      for (unsigned i = 0, l = PHI->getNumOperands(); i < l; ++i) {
+        auto Op = PHI->getOperand(i);
+        auto BB = PHI->getIncomingBlock(i);
         auto OVE = ValueToExp[Op];
+
+        // Ignored expressions produce Bottom value right away
+        if (IgnoredExpression::classof(OVE) ||
+            UnknownExpression::classof(OVE)) {
+          TOK = GetBotTok();
+          break;
+        }
 
         // A variable or a constant regarded as Top value
         if (IsVariableOrConstant(OVE)) {
           TOK = CalculateToken(TOK, GetTopTok());
+          if (!TopMostBottomBlock) {
+            TopMostBottomBlock = BB;
+          } else if (DT->dominates(BB, TopMostBottomBlock)) {
+            TopMostBottomBlock = BB;
+          }
+
           continue;
         }
 
@@ -1267,7 +1285,24 @@ FactorInsertion() {
         // Otherwise we use whatever this VE is prototyped by
         } else {
           TOK = CalculateToken(TOK, VExprToPExpr[OVE]);
+          NonBottomArgs.insert(OVE);
           continue;
+        }
+      }
+
+      // If there any bottom arguments we need to verify that all other
+      // argument expressions' arguments dominate this bottom's origin basic
+      // block
+      if (TOK != GetBotTok() && TopMostBottomBlock) {
+        for (auto VE : NonBottomArgs) {
+          auto T = InstToVExpr[TopMostBottomBlock->getTerminator()];
+          // The first term checks whether VE's operands dominate every bottoms'
+          // origin blocks. The second term is a special case for cycles, if VE
+          // is a back-branch we can still use this PHI as a Factor.
+          if (!OperandsDominate(VE, T) && !DT->dominates(PHI, VExprToInst[VE])) {
+            TOK = GetBotTok();
+            break;
+          }
         }
       }
 
@@ -1722,16 +1757,16 @@ Rename() {
 
   SmallPtrSet<FactorExpression *, 32> FactorKillList;
   for (auto P : FactorToPHI) {
-    auto LF = (FactorExpression *)P.getFirst();
+    auto MF = (FactorExpression *)P.getFirst();
     for (auto F : FExprs) {
 
-      if (F->getBB() != LF->getBB()) continue;
-      if (F->getPExpr() != LF->getPExpr()) continue;
-      if (F->getIsMaterialized() || LF == F) continue;
+      if (F->getBB() != MF->getBB()) continue;
+      if (F->getPExpr() != MF->getPExpr()) continue;
+      if (F->getIsMaterialized() || MF == F) continue;
 
       bool Same = true;
       for (auto BB : F->getPreds()) {
-        auto LFVE = LF->getVExpr(BB);
+        auto MFVE = MF->getVExpr(BB);
         auto FVE = F->getVExpr(BB);
 
         // NOTE
@@ -1739,19 +1774,23 @@ Rename() {
         // Factor we cannot infer that a variable or a constant is coming from
         // the predecessor and we assign it to ⊥, but a Linked Factor will know
         // for sure whether a constant/variable is involved.
-        if (IsVariableOrConstant(LFVE) && FVE == GetBottom()) continue;
+        // FIXME All other expressions' arguments MUST dominate this bottom
+        // FIXME quasi-expression
+        if (IsVariableOrConstant(MFVE) && FVE == GetBottom()) {
+          continue;
+        }
 
         // NOTE
         // Yet another special case, since we do not add same version on the
         // stack it is possible to have a Factor as an operand of itself, this
-        // happens for cycles only. We treat such an operand as a bottom and
-        // ignore it.
-        if (FVE == LF || FVE == F) continue;
+        // happens for back branches only. We treat such an operand as a bottom
+        // and ignore it.
+        if (FVE == MF || FVE == F) continue;
 
         // The actual instances is of no use, since MFactor can cointain real
-        // expression the the other Factor may contain the MFactor as operand
+        // expression the other Factor may contain the MFactor as operand
         // if those expressions never used
-        if (LFVE->getVersion() != FVE->getVersion()) {
+        if (MFVE->getVersion() != FVE->getVersion()) {
           Same = false;
           break;
         }

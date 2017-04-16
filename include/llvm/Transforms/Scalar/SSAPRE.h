@@ -643,7 +643,7 @@ private:
   bool NotStrictlyDominates(const Expression *Def, const Expression *Use);
 
   // Check whether Expression operands' definitions dominate the Factor
-  bool OperandsDominate(const Expression *E, const FactorExpression *F);
+  bool OperandsDominate(const Expression *E, const Expression *F);
 
   // Find out whether Expression versions are used on a Path before(including)
   // another Expression occurance
