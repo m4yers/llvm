@@ -1039,6 +1039,10 @@ public:
 
 void SSAPRE::
 Init(Function &F) {
+  LastVariableVersion = VR_VariableLo;
+  LastConstantVersion = VR_ConstantLo;
+  LastIgnoredVersion  = VR_IgnoredLo;
+
   for (auto &A : F.args()) {
     auto VAExp = CreateVariableExpression(A);
     ExpToValue[VAExp] = &A;
@@ -1046,10 +1050,6 @@ Init(Function &F) {
     VAExpToValue[VAExp] = &A;
     ValueToVAExp[&A] = VAExp;
   }
-
-  LastVariableVersion = VR_VariableLo;
-  LastConstantVersion = VR_ConstantLo;
-  LastIgnoredVersion  = VR_IgnoredLo;
 
   AddSubstitution(GetBottom(), GetBottom());
 
@@ -1296,9 +1296,10 @@ FactorInsertion() {
       if (TOK != GetBotTok() && TopMostBottomBlock) {
         for (auto VE : NonBottomArgs) {
           auto T = InstToVExpr[TopMostBottomBlock->getTerminator()];
-          // The first term checks whether VE's operands dominate every bottoms'
-          // origin blocks. The second term is a special case for cycles, if VE
-          // is a back-branch we can still use this PHI as a Factor.
+          // The first term checks whether VE's operands dominate every
+          // bottoms' origin blocks. The second term is a special case for
+          // cycles, if VE is a back-branch we can still use this PHI as a
+          // Factor.
           if (!OperandsDominate(VE, T) && !DT->dominates(PHI, VExprToInst[VE])) {
             TOK = GetBotTok();
             break;
@@ -2321,10 +2322,26 @@ PrintDebug(const std::string &Caption) {
   dbgs() << "\n---------------------------\n";
   for (auto &P : PExprToInsts) {
     auto &PE = P.getFirst();
+    if (IgnoreExpression(PE)) continue;
     dbgs() << ExpressionTypeToString(PE->getExpressionType());
+    dbgs() << " " << (void *)PE;
     for (auto VE : PExprToVExprs[PE]) {
       auto I = VExprToInst[VE];
-      dbgs() << "\n\t";
+      dbgs() << "\n\t\t\t\t\t\t\t\t";
+      dbgs() << (I->getParent() ? "(l)" : "(d)");
+      dbgs() << " (" << InstrDFS[I]<< ") ";
+      VE->printInternal(dbgs());
+    }
+    dbgs() << "\n";
+  }
+  for (auto &P : PExprToInsts) {
+    auto &PE = P.getFirst();
+    if (!IgnoreExpression(PE)) continue;
+    dbgs() << ExpressionTypeToString(PE->getExpressionType());
+    dbgs() << " " << (void *)PE;
+    for (auto VE : PExprToVExprs[PE]) {
+      auto I = VExprToInst[VE];
+      dbgs() << "\n\t\t\t\t\t\t\t\t";
       dbgs() << (I->getParent() ? "(l)" : "(d)");
       dbgs() << " (" << InstrDFS[I]<< ") ";
       VE->printInternal(dbgs());

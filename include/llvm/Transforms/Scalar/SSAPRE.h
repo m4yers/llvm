@@ -79,8 +79,8 @@ enum VersionRanges : ExpVersion_t {
   VR_VariableLo = -1000,
   VR_VariableHi = -1999,
   VR_ConstantLo = -2000,
-  VR_ConstantHi = -2900,
-  VR_IgnoredLo  = -3000,
+  VR_ConstantHi = -3999,
+  VR_IgnoredLo  = -4000,
   VR_IgnoredHi  = -9999,
 };
 
