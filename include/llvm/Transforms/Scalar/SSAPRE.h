@@ -446,12 +446,12 @@ public:
     Versions[getVExprIndex(E)] = V;
   }
 
-  bool hasVExpr(Expression *V) const { return getVExprIndex(V) != -1UL; }
+  bool hasVExpr(const Expression *V) const { return getVExprIndex(V) != -1UL; }
   SmallVector<Expression *, 8> getVExprs() { return Versions; };
   Expression * getVExpr(BasicBlock *B) const { return Versions[Pred.lookup(B)]; }
 
   size_t getVExprNum() const { return Versions.size(); }
-  size_t getVExprIndex(Expression *V) const  {
+  size_t getVExprIndex(const Expression *V) const  {
     for(size_t i = 0, l = Versions.size(); i < l; ++i) {
       if (Versions[i] == V)
         return i;
@@ -638,6 +638,13 @@ private:
 
   bool IsVariableOrConstant(const Expression *E);
   bool IsFactoredPHI(Instruction *I);
+
+  // Check whether an Expression is Inductive, in a sense that it uses a
+  // phi-result and is an argument to this same phi. Such Inductive Expressions
+  // cannot be moved out of the enclosing cycle bounded by this phi.
+  bool IsInductionExpression(const FactorExpression *F, const Expression *E);
+  // Same as above but restricted to a particular Factor
+  bool IsInductionExpression(const Expression *E);
 
   // Not Strictly implies Def == Use -> True
   bool NotStrictlyDominates(const Expression *Def, const Expression *Use);

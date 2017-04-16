@@ -1815,11 +1815,42 @@ Rename() {
   for (auto F : FExprs) {
     for (auto VE : F->getVExprs()) {
       // This happens if the Factor is contained inside a cycle and there is
-      // not change in the expression's operands along this cycle
-      if (F->getVersion() == VE->getVersion())
+      // not change in the expression's operands along this cycle. Also this
+      // expression is not inductive relative to this Factor
+      if (F->getVersion() == VE->getVersion() && !IsInductionExpression(F, VE))
         F->setIsCycle(true);
     }
   }
+}
+
+bool SSAPRE::
+IsInductionExpression(const Expression *E) {
+  if (BasicExpression::classof(E)) {
+    for (auto &I : VExprToInst[E]->operands()) {
+      if (auto PHI = dyn_cast<PHINode>(I.get())) {
+        if (auto F = PHIToFactor[PHI]) {
+          if (F->hasVExpr(E))
+            return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+bool SSAPRE::
+IsInductionExpression(const FactorExpression *F, const Expression *E) {
+  if (BasicExpression::classof(E)) {
+    for (auto &I : VExprToInst[E]->operands()) {
+      if (auto PHI = dyn_cast<PHINode>(I.get())) {
+        if (auto FF = PHIToFactor[PHI]) {
+          if (F == FF)
+            return true;
+        }
+      }
+    }
+  }
+  return false;
 }
 
 void SSAPRE::
@@ -1936,7 +1967,7 @@ FinalizeVisit(BasicBlock *B) {
     VE->clrReload();
 
     // Linked PHI nodes are ignored, their Factors are processed separately
-    if (IsFactoredPHI(&I)) continue;
+    // if (IsFactoredPHI(&I)) continue;
 
     // Traverse operands and add Save count to theirs definitions
     for (auto &O : I.operands()) {
@@ -2144,10 +2175,11 @@ PHIInsertion() {
       IRBuilder<> Builder((Instruction *)B->getFirstNonPHI());
       auto BE = dyn_cast<BasicExpression>(F->getPExpr());
       auto PHI = Builder.CreatePHI(BE->getType(), F->getVExprNum());
-      for (auto &VE : F->getVExprs()) {
+      for (auto P : F->getPreds()) {
+        auto VE = F->getVExpr(P);
         auto SE = GetSubstitution(VE);
         auto I = VExprToInst[SE];
-        PHI->addIncoming(I, I->getParent());
+        PHI->addIncoming(I, P);
 
         // Add Save for each operand, since this Factor is live now
         if (BasicExpression::classof(SE)) {
