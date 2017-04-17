@@ -2250,6 +2250,23 @@ ApplySubstitutions() {
     }
     auto VE = (Expression *)P.getFirst();
 
+    // This is a simplification result replacing the real instruction
+    if (IsVariableOrConstant(VE)) {
+      Value * T = nullptr;
+      if (auto C = dyn_cast<ConstantExpression>(VE)) {
+        T = &C->getConstant();
+      } else if (auto V = dyn_cast<VariableExpression>(VE)) {
+        T = &V->getValue();
+      } else {
+        llvm_unreachable("...");
+      }
+
+      auto VI = VExprToInst[VE];
+      VI->replaceAllUsesWith(T);
+      KillList.push_back(VI);
+      continue;
+    }
+
     if (VE == GetBottom()) continue;
     if (IgnoreExpression(VE)) continue;
     if (IsToBeKilled(VE)) continue;

@@ -221,6 +221,8 @@ public:
   VariableExpression(const VariableExpression &) = delete;
   VariableExpression &operator=(const VariableExpression &) = delete;
 
+  Value &getValue() { return VariableValue; }
+
   static bool classof(const Expression *EB) {
     return EB->getExpressionType() == ET_Variable;
   }
@@ -248,6 +250,8 @@ public:
   ConstantExpression() = delete;
   ConstantExpression(const ConstantExpression &) = delete;
   ConstantExpression &operator=(const ConstantExpression &) = delete;
+
+  Constant &getConstant() { return ConstantValue; }
 
   static bool classof(const Expression *EB) {
     return EB->getExpressionType() == ET_Constant;
