@@ -397,21 +397,21 @@ KillFactor(FactorExpression *F) {
       V.erase(VS);
   }
 
-  if (F->getIsMaterialized()) {
-    F->setIsMaterialized(false);
-    auto PHI = FactorToPHI[F];
-    PHIToFactor.erase(PHI);
-    InstToVExpr.erase(PHI);
-    ValueToExp.erase(PHI);
-    PHIToFactor.erase(PHI);
-    FactorToPHI.erase(F);
-  }
-
   FactorToBlock.erase(F);
   FExprs.erase(F);
-  FactorToPHI.erase(F);
   VExprToInst.erase(F);
   ExpToValue.erase(F);
+
+  if (F->getIsMaterialized()) {
+    F->setIsMaterialized(false);
+    auto PHI = (PHINode *)FactorToPHI[F];
+    PHIToFactor[PHI] = nullptr;
+    FactorToPHI[F] = nullptr;
+
+    // Replace the FactorExpression with a regular PHIExpression
+    auto E = CreateExpression(*PHI);
+    AddExpression(E, E, PHI, PHI->getParent());
+  }
 
   AddSubstitution(F, GetBottom());
 }
@@ -1803,23 +1803,32 @@ Rename() {
     }
   }
 
+  // Determine cyclic Factors of whats left
+  for (auto F : FExprs) {
+
+    if (FactorKillList.count(F)) continue;
+    for (auto VE : F->getVExprs()) {
+
+      // Factors with related inductive operands are useless
+      if (IsInductionExpression(F, VE)) {
+        FactorKillList.insert(F);
+        break;
+      }
+
+      // This happens if the Factor is contained inside a cycle and there is
+      // not change in the expression's operands along this cycle.
+      if (F->getVersion() == VE->getVersion()) {
+        F->setIsCycle(true);
+      }
+    }
+  }
+
   // Remove all stuff related
   for (auto F : FactorKillList) {
     if (auto P = F->getProto()) {
       P->dropAllReferences();
     }
     KillFactor(F);
-  }
-
-  // Determine cyclic Factors of whats left
-  for (auto F : FExprs) {
-    for (auto VE : F->getVExprs()) {
-      // This happens if the Factor is contained inside a cycle and there is
-      // not change in the expression's operands along this cycle. Also this
-      // expression is not inductive relative to this Factor
-      if (F->getVersion() == VE->getVersion() && !IsInductionExpression(F, VE))
-        F->setIsCycle(true);
-    }
   }
 }
 
@@ -1964,8 +1973,6 @@ Finalize() {
   for (auto B : *RPOT) {
 
     for (auto F : BlockToFactors[B]) {
-      F->clrSave();
-      F->clrReload();
       auto V = F->getVersion();
       if (F->getWillBeAvail() || F->getIsCycle() || F->getIsMaterialized()) {
         auto PE = F->getPExpr();
@@ -1976,9 +1983,6 @@ Finalize() {
     for (auto &I : *B) {
       auto VE = InstToVExpr[&I];
       auto PE = VExprToPExpr[VE];
-
-      VE->clrSave();
-      VE->clrReload();
 
       // Linked PHI nodes are ignored, their Factors are processed separately
       if (IsFactoredPHI(&I)) continue;
