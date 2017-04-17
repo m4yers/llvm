@@ -2118,8 +2118,8 @@ FactorGraphWalk() {
 
           Changed = true;
 
-        // If Mat and Later this Factor is useless and we replace it with a real
-        // computation
+          // If Mat and Later this Factor is useless and we replace it with a real
+          // computation
         } else if (FE->getIsMaterialized() && FE->getLater()) {
           auto I = PE->getProto()->clone();
 
@@ -2134,16 +2134,36 @@ FactorGraphWalk() {
 
           Changed = true;
 
-        // This PHI/Factor stays after all so we need to save all its
-        // operands
+          // This PHI/Factor stays after all so we need to save all its
+          // operands
         } else if (FE->getIsMaterialized()) {
-            for (auto VE : FE->getVExprs()) {
-              if (BasicExpression::classof(VE)) {
-                VE->addSave();
-              }
+          for (auto VE : FE->getVExprs()) {
+            if (BasicExpression::classof(VE)) {
+              VE->addSave();
             }
-        // The others are yet to be materialized
+          }
+          // The others are yet to be materialized
         } else {
+        }
+
+        // Quick walk over Factor operands to check if we really need to
+        // insert it, it is possible that the operands are all the same.
+        if (!FE->getIsMaterialized() && FE->getWillBeAvail()) {
+          Expression * O = nullptr;
+          bool Same = true;
+          for (auto P : FE->getVExprs()) {
+            if (O && O != P) {
+              Same = false;
+              break;
+            }
+            O = P;
+          }
+
+          // If all the ops are the same just use it
+          if (Same) {
+            ReplaceFactor(FE, O);
+            Changed = true;
+          }
         }
       }
     }
