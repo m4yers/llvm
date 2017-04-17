@@ -649,18 +649,14 @@ Expression *SSAPRE::
 CheckSimplificationResults(Expression *E, Instruction &I, Value *V) {
   if (!V) return nullptr;
 
-  if (auto C = dyn_cast<Constant>(V)) {
-    DEBUG(dbgs() << "Simplified " << I << " to "
-                 << " constant " << *C << "\n");
-    assert(isa<BasicExpression>(E) &&
-           "We should always have had a basic expression here");
+  assert(isa<BasicExpression>(E) &&
+         "We should always have had a basic expression here");
 
+  // TODO Substitute the expressions with constant/variable at the end
+  if (auto C = dyn_cast<Constant>(V)) {
     ExpressionAllocator.Deallocate(E);
     return CreateConstantExpression(*C);
   } else if (isa<Argument>(V) || isa<GlobalVariable>(V)) {
-    DEBUG(dbgs() << "Simplified " << I << " to "
-                 << " variable " << *V << "\n");
-
     ExpressionAllocator.Deallocate(E);
     return CreateVariableExpression(*V);
   }
