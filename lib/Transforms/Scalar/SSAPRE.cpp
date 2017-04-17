@@ -1941,70 +1941,6 @@ WillBeAvail() {
 }
 
 void SSAPRE::
-FinalizeVisit(BasicBlock *B) {
-  DenseMap<const Expression *, DenseMap<int, Expression *>> AvailDef;
-
-  // Init available definitons map
-  for (auto &P : PExprToInsts) {
-    AvailDef.insert({P.getFirst(), DenseMap<int,Expression *>()});
-  }
-
-  for (auto F : BlockToFactors[B]) {
-    F->clrSave();
-    F->clrReload();
-    auto V = F->getVersion();
-    if (F->getWillBeAvail() || F->getIsCycle() || F->getIsMaterialized()) {
-      auto PE = F->getPExpr();
-      AvailDef[PE][V] = F;
-    }
-  }
-
-  for (auto &I : *B) {
-    auto VE = InstToVExpr[&I];
-    auto PE = VExprToPExpr[VE];
-
-    VE->clrSave();
-    VE->clrReload();
-
-    // Linked PHI nodes are ignored, their Factors are processed separately
-    // if (IsFactoredPHI(&I)) continue;
-
-    // Traverse operands and add Save count to theirs definitions
-    for (auto &O : I.operands()) {
-      if (auto &E = ValueToExp[O]) {
-        if (BasicExpression::classof(E))
-          E->addSave();
-      }
-    }
-
-    // We ignore these definitions
-    if (IgnoreExpression(VE)) continue;
-
-    // Restore substitution after Rename. This is necessary because there might
-    // be records that bind an expression with a non available in any way
-    // factor. This does not (or at least should not) break anything achieved
-    // in rename since cycled operands considered available.
-    AddSubstitution(VE, VE);
-
-    auto V = VE->getVersion();
-    auto &ADPE = AvailDef[PE];
-    auto DEF = AvailDef[PE][V];
-
-    // If there was no expression occurrence before, or it was an expression's
-    // operand definition, or the previous expression does not strictly
-    // dominate the current occurrence we update the record
-    if (!DEF || IsBottom(DEF) || !NotStrictlyDominates(DEF, VE)) {
-      ADPE[V] = VE;
-
-    // Otherwise, it is the same expression of the same version, and we just
-    // add the substitution
-    } else {
-      AddSubstitution(VE, DEF);
-    }
-  }
-}
-
-void SSAPRE::
 Finalize() {
   // Finalize step performs the following tasks:
   //   - Decides for each Real expression whether it should be computed on the
@@ -2018,8 +1954,68 @@ Finalize() {
   //     for the temp. Factors that are not will_be_avail will not be part of the
   //     SSA form of the temp, and links from will_be_avail Factors that
   //     reference them are fixed up to other(real or inserted) expressions.
+
+  DenseMap<const Expression *, DenseMap<int, Expression *>> AvailDef;
+
+  // Init available definitons map
+  for (auto &P : PExprToInsts) {
+    AvailDef.insert({P.getFirst(), DenseMap<int,Expression *>()});
+  }
   for (auto B : *RPOT) {
-    FinalizeVisit(B);
+
+    for (auto F : BlockToFactors[B]) {
+      F->clrSave();
+      F->clrReload();
+      auto V = F->getVersion();
+      if (F->getWillBeAvail() || F->getIsCycle() || F->getIsMaterialized()) {
+        auto PE = F->getPExpr();
+        AvailDef[PE][V] = F;
+      }
+    }
+
+    for (auto &I : *B) {
+      auto VE = InstToVExpr[&I];
+      auto PE = VExprToPExpr[VE];
+
+      VE->clrSave();
+      VE->clrReload();
+
+      // Linked PHI nodes are ignored, their Factors are processed separately
+      if (IsFactoredPHI(&I)) continue;
+
+      // Traverse operands and add Save count to theirs definitions
+      for (auto &O : I.operands()) {
+        if (auto &E = ValueToExp[O]) {
+          if (BasicExpression::classof(E))
+            E->addSave();
+        }
+      }
+
+      // We ignore these definitions
+      if (IgnoreExpression(VE)) continue;
+
+      // Restore substitution after Rename. This is necessary because there might
+      // be records that bind an expression with a non available in any way
+      // factor. This does not (or at least should not) break anything achieved
+      // in rename since cycled operands considered available.
+      AddSubstitution(VE, VE);
+
+      auto V = VE->getVersion();
+      auto &ADPE = AvailDef[PE];
+      auto DEF = ADPE[V];
+
+      // If there was no expression occurrence before, or it was an expression's
+      // operand definition, or the previous expression does not strictly
+      // dominate the current occurrence we update the record
+      if (!DEF || IsBottom(DEF) || !NotStrictlyDominates(DEF, VE)) {
+        ADPE[V] = VE;
+
+        // Otherwise, it is the same expression of the same version, and we just
+        // add the substitution
+      } else {
+        AddSubstitution(VE, DEF);
+      }
+    }
   }
 }
 

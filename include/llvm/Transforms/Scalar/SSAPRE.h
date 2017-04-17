@@ -739,7 +739,6 @@ private:
   void ResetLater(FactorExpression *F);
   void WillBeAvail();
 
-  void FinalizeVisit(BasicBlock *B);
   void Finalize();
 
   bool FactorGraphWalk();
