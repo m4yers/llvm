@@ -119,14 +119,14 @@ bool SSAPRE::
 StrictlyDominates(const Expression *Def, const Expression *Use) {
   assert (Def && Use && "Def or Use is null");
 
-  // If the expression is a Factor we need to use the first non-phi instruction
+  // If the expression is a Factor we need to use the first instruction
   // of the block it belongs to
   auto IDef = FactorExpression::classof(Def)
-                ? FactorToBlock[(FactorExpression *)Def]->getFirstNonPHI()
+                ? &FactorToBlock[(FactorExpression *)Def]->front()
                 : VExprToInst[Def];
 
   auto IUse = FactorExpression::classof(Use)
-                ? FactorToBlock[(FactorExpression *)Use]->getFirstNonPHI()
+                ? &FactorToBlock[(FactorExpression *)Use]->front()
                 : VExprToInst[Use];
 
   assert (IDef && IUse && "IDef or IUse is null");
@@ -138,14 +138,14 @@ bool SSAPRE::
 NotStrictlyDominates(const Expression *Def, const Expression *Use) {
   assert (Def && Use && "Def or Use is null");
 
-  // If the expression is a Factor we need to use the first non-phi instruction
+  // If the expression is a Factor we need to use the first instruction
   // of the block it belongs to
   auto IDef = FactorExpression::classof(Def)
-                ? FactorToBlock[(FactorExpression *)Def]->getFirstNonPHI()
+                ? &FactorToBlock[(FactorExpression *)Def]->front()
                 : VExprToInst[Def];
 
   auto IUse = FactorExpression::classof(Use)
-                ? FactorToBlock[(FactorExpression *)Use]->getFirstNonPHI()
+                ? &FactorToBlock[(FactorExpression *)Use]->front()
                 : VExprToInst[Use];
 
   assert (IDef && IUse && "IDef or IUse is null");
@@ -655,12 +655,12 @@ CheckSimplificationResults(Expression *E, Instruction &I, Value *V) {
     assert(isa<BasicExpression>(E) &&
            "We should always have had a basic expression here");
 
-    // FIXME ignore contants for now
     ExpressionAllocator.Deallocate(E);
-    return CreateIgnoredExpression(I);
+    return CreateConstantExpression(*C);
   } else if (isa<Argument>(V) || isa<GlobalVariable>(V)) {
     DEBUG(dbgs() << "Simplified " << I << " to "
                  << " variable " << *V << "\n");
+
     ExpressionAllocator.Deallocate(E);
     return CreateVariableExpression(*V);
   }
@@ -1928,7 +1928,15 @@ ResetCanBeAvail(FactorExpression *G) {
   G->setCanBeAvail(false);
   for (auto F : FExprs) {
     if (F->hasVExpr(G) && !F->getHasRealUse(G)) {
+
       F->replaceVExpr(G, GetBottom());
+
+      // If it happens to be a cycle clear the flag
+      if (F->getIsCycle() && F == G) {
+        assert(F->getVExprNum() == 2 && "Well shit...");
+        F->setIsCycle(false);
+      }
+
       if (!F->getDownSafe() && F->getCanBeAvail()) {
         ResetCanBeAvail(F);
       }
@@ -2405,6 +2413,7 @@ PrintDebug(const std::string &Caption) {
     }
     dbgs() << "\n";
   }
+  dbgs() << "--------\n";
   for (auto &P : PExprToInsts) {
     auto &PE = P.getFirst();
     if (!IgnoreExpression(PE)) continue;

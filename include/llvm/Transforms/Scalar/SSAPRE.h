@@ -234,7 +234,7 @@ public:
 
   void printInternal(raw_ostream &OS) const override {
     this->Expression::printInternal(OS);
-    OS << "A: " << VariableValue;
+    OS << ", V: " << VariableValue;
   }
 };
 
@@ -262,7 +262,7 @@ public:
 
   void printInternal(raw_ostream &OS) const override {
     this->Expression::printInternal(OS);
-    OS << "C:" << ConstantValue;
+    OS << ", C:" << ConstantValue;
   }
 };
 
