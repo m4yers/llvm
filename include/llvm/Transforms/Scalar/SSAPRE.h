@@ -62,12 +62,14 @@ enum ExpressionType {
 
 inline std::string ExpressionTypeToString(ExpressionType ET) {
   switch (ET) {
-  case ET_Ignored: return "ExpressionTypeIgnored";
-  case ET_Unknown: return "ExpressionTypeUnknown";
-  case ET_Basic:   return "ExpressionTypeBasic";
-  case ET_Phi:     return "ExpressionTypePhi";
-  case ET_Factor:  return "ExpressionTypeFactor";
-  default:         return "ExpressionType???";
+  case ET_Ignored:   return "ExpressionTypeIgnored";
+  case ET_Unknown:   return "ExpressionTypeUnknown";
+  case ET_Basic:     return "ExpressionTypeBasic";
+  case ET_Phi:       return "ExpressionTypePhi";
+  case ET_Factor:    return "ExpressionTypeFactor";
+  case ET_Variable:  return "ExpressionTypeVariable";
+  case ET_Constant:  return "ExpressionTypeConstant";
+  default:           return "ExpressionType???";
   }
 }
 
@@ -224,8 +226,10 @@ public:
   }
 
   bool equals(const Expression &Other) const override {
-    const VariableExpression &OC = cast<VariableExpression>(Other);
-    return &VariableValue == &OC.VariableValue;
+    if (auto OC = dyn_cast<VariableExpression>(&Other)) {
+      return &VariableValue == &OC->VariableValue;
+    }
+    return false;
   }
 
   void printInternal(raw_ostream &OS) const override {
@@ -250,8 +254,10 @@ public:
   }
 
   bool equals(const Expression &Other) const override {
-    const ConstantExpression &OC = cast<ConstantExpression>(Other);
-    return &ConstantValue == &OC.ConstantValue;
+    if (auto OC = cast<ConstantExpression>(&Other)) {
+      return &ConstantValue == &OC->ConstantValue;
+    }
+    return false;
   }
 
   void printInternal(raw_ostream &OS) const override {
