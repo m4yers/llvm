@@ -47,7 +47,7 @@ using namespace llvm::ssapre;
 #define DEBUG_TYPE "ssapre"
 
 STATISTIC(SSAPREInstrSaved,    "Number of instructions saved");
-STATISTIC(SSAPREInstrReloaded, "Number of instructions reloaded");
+STATISTIC(SSAPREInstrSubstituted, "Number of instructions substituted");
 STATISTIC(SSAPREInstrInserted, "Number of instructions inserted");
 STATISTIC(SSAPREInstrDeleted,  "Number of instructions deleted");
 STATISTIC(SSAPREBlocksAdded,   "Number of blocks deleted");

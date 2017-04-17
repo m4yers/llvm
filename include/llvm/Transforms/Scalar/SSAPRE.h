@@ -93,14 +93,13 @@ private:
   Instruction *Proto;
 
   int Saved;
-  bool Reload;
 
 public:
   Expression(ExpressionType ET = ET_Base, unsigned O = ~2U,
              ExpVersion_t V = VR_Unset)
       : EType(ET), Opcode(O), Version(V),
         Proto(nullptr),
-        Saved(0), Reload(false) {}
+        Saved(0) {}
   Expression(const Expression &) = delete;
   Expression &operator=(const Expression &) = delete;
   virtual ~Expression();
@@ -121,10 +120,6 @@ public:
   void remSave() { Saved--; }
   void addSave() { Saved++; }
   void addSave(int S) { Saved += S; }
-
-  int getReload() const { return Reload; }
-  void setReload(int R) { Reload = R; }
-  void clrReload() { Reload = false; }
 
   static unsigned getEmptyKey() { return ~0U; }
   static unsigned getTombstoneKey() { return ~1U; }
@@ -147,7 +142,7 @@ public:
 
   virtual bool equals(const Expression &O) const {
     if (EType == O.EType && Opcode == O.Opcode && Version == O.Version) {
-      assert(Saved == O.Saved && Reload == O.Reload &&
+      assert(Saved == O.Saved &&
           "Expressions are not fully equal");
       return true;
     }
@@ -158,7 +153,6 @@ public:
     OS << ExpressionTypeToString(getExpressionType());
     OS << ", V: " << Version;
     OS << ", S: " << Saved;
-    OS << ", R: " << (Reload ? "T" : "F");
     // OS << ", OPC: " << getOpcode() << ", ";
   }
 
