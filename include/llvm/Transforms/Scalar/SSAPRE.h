@@ -42,7 +42,7 @@ class TokenPropagationSolver;
 
 enum ExpressionType {
   ET_Base,
-  ET_Buttom,
+  ET_Bottom,
   ET_Ignored,
   ET_Unknown,
   ET_Constant,
@@ -640,6 +640,7 @@ private:
   // Same as above but restricted to a particular Factor
   bool IsInductionExpression(const Expression *E);
 
+  bool StrictlyDominates(const Expression *Def, const Expression *Use);
   // Not Strictly implies Def == Use -> True
   bool NotStrictlyDominates(const Expression *Def, const Expression *Use);
 

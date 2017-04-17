@@ -74,7 +74,7 @@ IsVersionUnset(const Expression *E) {
 }
 
 // This is used as ⊥ version
-static Expression BExpr(ET_Buttom, ~2U, VR_Bottom);
+static Expression BExpr(ET_Bottom, ~2U, VR_Bottom);
 static Expression * GetBottom() { return &BExpr; }
 
 ExpVector_t & SSAPRE::
@@ -116,6 +116,25 @@ IsFactoredPHI(Instruction *I) {
 }
 
 bool SSAPRE::
+StrictlyDominates(const Expression *Def, const Expression *Use) {
+  assert (Def && Use && "Def or Use is null");
+
+  // If the expression is a Factor we need to use the first non-phi instruction
+  // of the block it belongs to
+  auto IDef = FactorExpression::classof(Def)
+                ? FactorToBlock[(FactorExpression *)Def]->getFirstNonPHI()
+                : VExprToInst[Def];
+
+  auto IUse = FactorExpression::classof(Use)
+                ? FactorToBlock[(FactorExpression *)Use]->getFirstNonPHI()
+                : VExprToInst[Use];
+
+  assert (IDef && IUse && "IDef or IUse is null");
+
+  return DT->dominates(IDef, IUse);
+}
+
+bool SSAPRE::
 NotStrictlyDominates(const Expression *Def, const Expression *Use) {
   assert (Def && Use && "Def or Use is null");
 
@@ -150,7 +169,7 @@ OperandsDominate(const Expression *Def, const Expression *Use) {
     // version.
     E = GetSubstitution(E);
 
-    if (!NotStrictlyDominates(E, Use)) return false;
+    if (!StrictlyDominates(E, Use)) return false;
   }
 
   return true;
@@ -2030,7 +2049,8 @@ FactorGraphWalk() {
   // bottom-up processing
   for (auto BS = JoinBlocks.rbegin(), BE = JoinBlocks.rend(); BS != BE; ++BS) {
     auto B = (BasicBlock *)*BS;
-    for (auto FE : BlockToFactors[B]) {
+    auto Factors = BlockToFactors[B];
+    for (auto FE : Factors) {
       auto PE = (Expression *)FE->getPExpr();
 
       if (FE->getIsCycle()) {
@@ -2166,6 +2186,11 @@ FactorGraphWalk() {
           }
         }
       }
+
+      // Kill non-materializd factors
+      if (!FE->getWillBeAvail() && !FE->getIsMaterialized()) {
+        KillFactor(FE);
+      }
     }
   }
 
@@ -2185,12 +2210,6 @@ PHIInsertion() {
     for (auto F : P.getSecond()) {
 
       if (F->getIsMaterialized()) continue;
-
-      // Kill non-materializd factors
-      if (!F->getWillBeAvail()) {
-        if (!F->getIsMaterialized()) KillFactor(F);
-        continue;
-      }
 
       IRBuilder<> Builder((Instruction *)B->getFirstNonPHI());
       auto BE = dyn_cast<BasicExpression>(F->getPExpr());
@@ -2340,16 +2359,16 @@ CodeMotion() {
   bool Changed = false;
 
   Changed |= FactorGraphWalk();
-  PrintDebug("CodeMotion.FactorGraphWalk");
+  DEBUG(PrintDebug("CodeMotion.FactorGraphWalk"));
 
   Changed |= PHIInsertion();
-  PrintDebug("CodeMotion.PHIInsertion");
+  DEBUG(PrintDebug("CodeMotion.PHIInsertion"));
 
   Changed |= ApplySubstitutions();
-  PrintDebug("CodeMotion.ApplySubstitutions");
+  DEBUG(PrintDebug("CodeMotion.ApplySubstitutions"));
 
   Changed |= KillEmAll();
-  // PrintDebug("CodeMotion.KillEmAll");
+  // DEBUG(PrintDebug("CodeMotion.KillEmAll"));
 
   return Changed;
 }
