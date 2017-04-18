@@ -652,10 +652,10 @@ CheckSimplificationResults(Expression *E, Instruction &I, Value *V) {
   assert(isa<BasicExpression>(E) &&
          "We should always have had a basic expression here");
 
-  // TODO Substitute the expressions with constant/variable at the end
   if (auto C = dyn_cast<Constant>(V)) {
     ExpressionAllocator.Deallocate(E);
     return CreateConstantExpression(*C);
+
   } else if (isa<Argument>(V) || isa<GlobalVariable>(V)) {
     ExpressionAllocator.Deallocate(E);
     return CreateVariableExpression(*V);
@@ -2205,24 +2205,47 @@ bool SSAPRE::
 PHIInsertion() {
   bool Changed = false;
 
+  // So we don't have to worry about order and back branches
+  typedef std::pair<PHINode *, BasicBlock *> PHIPatch;
+  typedef SmallVector<PHIPatch, 8> PHIPatchList;
+  DenseMap<FactorExpression *, PHIPatchList> PHIPatches;
+
   for (auto &P : BlockToFactors) {
     auto &B = P.getFirst();
 
-    // Check parameters of potential PHIs, they are either:
-    //  - Factor
-    //  - Saved Expression
     for (auto F : P.getSecond()) {
 
+      // Nothing to do here
       if (F->getIsMaterialized()) continue;
 
       IRBuilder<> Builder((Instruction *)B->getFirstNonPHI());
       auto BE = dyn_cast<BasicExpression>(F->getPExpr());
       auto PHI = Builder.CreatePHI(BE->getType(), F->getVExprNum());
+
+      // If there is a patch point awaiting this PHI
+      if (PHIPatches.count(F)) {
+        for (auto &PP : PHIPatches[F]) {
+          auto PPHI = PP.first;
+          auto PB = PP.second;
+          PPHI->addIncoming(PHI, PB);
+        }
+      }
+
+      // Fill-in PHI operands
       for (auto P : F->getPreds()) {
         auto VE = F->getVExpr(P);
         auto SE = GetSubstitution(VE);
-        auto I = VExprToInst[SE];
-        PHI->addIncoming(I, P);
+
+        // If the operand is still non-materialized Factor we create a patch
+        // point
+        auto FF = dyn_cast<FactorExpression>(SE);
+        if (FF && !FF->getIsMaterialized()) {
+          if (!PHIPatches.count(FF)) PHIPatches.insert({FF, {}});
+          PHIPatches[FF].push_back({PHI, P});
+        } else {
+          auto I = VExprToInst[SE];
+          PHI->addIncoming(I, P);
+        }
 
         // Add Save for each operand, since this Factor is live now
         if (BasicExpression::classof(SE)) {

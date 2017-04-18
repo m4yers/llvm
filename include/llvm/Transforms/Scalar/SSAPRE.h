@@ -258,7 +258,7 @@ public:
   }
 
   bool equals(const Expression &Other) const override {
-    if (auto OC = cast<ConstantExpression>(&Other)) {
+    if (auto OC = dyn_cast<ConstantExpression>(&Other)) {
       return &ConstantValue == &OC->ConstantValue;
     }
     return false;
