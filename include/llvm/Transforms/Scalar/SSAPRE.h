@@ -434,6 +434,10 @@ public:
   const Expression* getPExpr() const { return PE; }
 
   void addPred(BasicBlock *B, size_t I) {
+    // Even if there are multiple edges from the same predecessor we store only
+    // once
+    if (Pred.count(B)) return;
+
     Pred[B] = I;
     Indices[I] = B;
     Blocks.insert(B);
@@ -451,11 +455,12 @@ public:
   }
 
   bool hasVExpr(const Expression *V) const { return getVExprIndex(V) != -1UL; }
-  SmallVector<Expression *, 8> getVExprs() { return Versions; };
+  SmallVector<Expression *, 8> &getVExprs() { return Versions; };
   Expression * getVExpr(BasicBlock *B) const { return Versions[Pred.lookup(B)]; }
 
   size_t getVExprNum() const { return Versions.size(); }
   size_t getVExprIndex(const Expression *V) const  {
+    assert(V);
     for(size_t i = 0, l = Versions.size(); i < l; ++i) {
       if (Versions[i] == V)
         return i;
@@ -482,10 +487,17 @@ public:
   // the Factor is already materialized into a PHI and this PHI is used.  bool
   // getIsAvail() const { return CanBeAvail && Materialized; }
 
-  bool getHasRealUse(Expression *E) const { return HasRealUse[getVExprIndex(E)]; }
-  void setHasRealUse(Expression *E, bool HRU) { HasRealUse[getVExprIndex(E)] = HRU; }
+  bool getHasRealUse(Expression *E) const {
+    assert(E && hasVExpr(E));
+    return HasRealUse[getVExprIndex(E)];
+  }
+  void setHasRealUse(Expression *E, bool HRU) {
+    assert(E && hasVExpr(E));
+    HasRealUse[getVExprIndex(E)] = HRU;
+  }
 
   static bool classof(const Expression *EB) {
+    assert(EB);
     return EB->getExpressionType() == ET_Factor;
   }
 
@@ -505,16 +517,23 @@ public:
     OS << ", PE: " << (void *)PE;
     OS << ", MAT: " << Materialized;
     OS << ", CYC: " << Cycle;
-    OS << ", V: <";
+    OS << ", V: {";
     for (unsigned i = 0, l = Versions.size(); i < l; ++i) {
-      if (Versions[i]) {
-        OS << Versions[i]->getVersion();
+      auto B = Indices.lookup(i);
+      B->printAsOperand(dbgs());
+      OS << ":";
+      auto VE = getVExpr(B);
+      if (VE) {
+        if (VE->getVersion() == VR_Bottom)
+          OS << "⊥";
+        else
+          OS << VE->getVersion();
       } else {
         OS << "×";
       }
       if (i + 1 != l) OS << ",";
     }
-    OS << ">";
+    OS << "}";
     OS << ", DS: " << (DownSafe ? "T" : "F");
     OS << ", HRU: <";
     for (unsigned i = 0, l = HasRealUse.size(); i < l; ++i) {
@@ -605,15 +624,12 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
   DenseMap<const FactorExpression *, const BasicBlock *> FactorToBlock;
 
   // VersionedExpression-to-ProtoVersioned
-  DenseMap<const Expression *, const Expression *> VExprToPExpr;
+  DenseMap<const Expression *, const Expression *> ExprToPExpr;
 
   SmallPtrSet<FactorExpression *, 32> FExprs;
 
-  // This map contains 1-to-1 correspondence between Expression Occurrence and
-  // its Definition. Upon initialization Keys will be equal to Values, once
-  // an Expression assumes existing Version it must define its Definition, so
-  // that during kill time we could replace its use with a proper definition.
-  DenseMap<Expression *, Expression *> Substitutions;
+  typedef DenseMap<Expression *, Expression *> ExpExpMap;
+  DenseMap<const Expression *, ExpExpMap> Substitutions;
 
   // Store all the PHIs that are considered to be Factors at any point in the
   // pass. Useful during kill time to separate ordinal and factored phis, since
@@ -650,6 +666,12 @@ private:
   // Same as above but restricted to a particular Factor
   bool IsInductionExpression(const Expression *E);
 
+  // Returns instruction do be used with Dominance comparisons. For Factors and
+  // PHIs returns the front of the containing basic block, this ensures that
+  // those two treated as occurring at the same time which enables non-strict
+  // dominance calculation.
+  const Instruction *GetDomRepresentativeInstruction(const Expression * E);
+  // Not Strictly implies Def == Use -> False
   bool StrictlyDominates(const Expression *Def, const Expression *Use);
   // Not Strictly implies Def == Use -> True
   bool NotStrictlyDominates(const Expression *Def, const Expression *Use);
@@ -657,13 +679,15 @@ private:
   // Check whether Expression operands' definitions dominate the Factor
   bool OperandsDominate(const Expression *E, const Expression *F);
 
+  bool OperandsDominateStrictly(const Expression *E, const Expression *F);
+
   // Find out whether Expression versions are used on a Path before(including)
-  // another Expression occurance
+  // another Expression occurrence
   bool HasRealUseBefore(const Expression *S, const BBVector_t &P,
                         const Expression *E);
 
   // Find out whether Factor(its versions) is used on a Path before(including)
-  // another Expression occurance
+  // another Expression occurrence
   bool FactorHasRealUseBefore(const FactorExpression *F, const BBVector_t &P,
                               const Expression *E);
 
@@ -674,11 +698,12 @@ private:
 
   void SetOrderBefore(Instruction *I, Instruction *B);
   void SetAllOperandsSave(Instruction *I);
-  void AddSubstitution(Expression * E, Expression * S);
+  void AddSubstitution(Expression *E, Expression *S);
+  void RemSubstitution(Expression *E);
 
   // Go through all the Substitutions of the Expression and return the most
   // recent one
-  Expression * GetSubstitution(Expression * E);
+  Expression * GetSubstitution(Expression * E, bool Direct = false);
 
   // Go through all the substitutions of the Expression and return the most
   // recent value available

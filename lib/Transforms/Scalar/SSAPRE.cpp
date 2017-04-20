@@ -88,7 +88,7 @@ GetFactorVersions(const FactorExpression *F) {
 ExpVector_t & SSAPRE::
 GetExpVersions(const Expression *E) {
   assert(E && !IsBottom(E));
-  auto PE = VExprToPExpr[E];
+  auto PE = ExprToPExpr[E];
   assert(PE && !IsBottom(PE));
   return PExprToVersions[PE][E->getVersion()];
 }
@@ -115,21 +115,28 @@ IsFactoredPHI(Instruction *I) {
   return false;
 }
 
+const Instruction * SSAPRE::
+GetDomRepresentativeInstruction(const Expression * E) {
+  if (auto FE = dyn_cast<FactorExpression>(E)) {
+    return &FactorToBlock[FE]->front();
+  } else if (auto PHIE = dyn_cast<PHIExpression>(E)) {
+    return &VExprToInst[PHIE]->getParent()->front();
+  }
+
+  return VExprToInst[E];
+}
+
 bool SSAPRE::
 StrictlyDominates(const Expression *Def, const Expression *Use) {
   assert (Def && Use && "Def or Use is null");
 
-  // If the expression is a Factor we need to use the first instruction
-  // of the block it belongs to
-  auto IDef = FactorExpression::classof(Def)
-                ? &FactorToBlock[(FactorExpression *)Def]->front()
-                : VExprToInst[Def];
-
-  auto IUse = FactorExpression::classof(Use)
-                ? &FactorToBlock[(FactorExpression *)Use]->front()
-                : VExprToInst[Use];
+  auto IDef = GetDomRepresentativeInstruction(Def);
+  auto IUse = GetDomRepresentativeInstruction(Use);
 
   assert (IDef && IUse && "IDef or IUse is null");
+
+  // Strictly
+  if (IDef == IUse) return false;
 
   return DT->dominates(IDef, IUse);
 }
@@ -138,15 +145,8 @@ bool SSAPRE::
 NotStrictlyDominates(const Expression *Def, const Expression *Use) {
   assert (Def && Use && "Def or Use is null");
 
-  // If the expression is a Factor we need to use the first instruction
-  // of the block it belongs to
-  auto IDef = FactorExpression::classof(Def)
-                ? &FactorToBlock[(FactorExpression *)Def]->front()
-                : VExprToInst[Def];
-
-  auto IUse = FactorExpression::classof(Use)
-                ? &FactorToBlock[(FactorExpression *)Use]->front()
-                : VExprToInst[Use];
+  auto IDef = GetDomRepresentativeInstruction(Def);
+  auto IUse = GetDomRepresentativeInstruction(Use);
 
   assert (IDef && IUse && "IDef or IUse is null");
 
@@ -158,6 +158,29 @@ NotStrictlyDominates(const Expression *Def, const Expression *Use) {
 
 bool SSAPRE::
 OperandsDominate(const Expression *Def, const Expression *Use) {
+  for (auto &O : VExprToInst[Def]->operands()) {
+    auto E = ValueToExp[O];
+
+    // Variables or Constants occurs indefinitely before any expression
+    if (IsVariableOrConstant(E)) continue;
+
+    // We want to use the earliest occurrence of the operand, it will be either
+    // a Factor, another definition or the same definition if it defines a new
+    // version.
+    E = GetSubstitution(E);
+
+    if (IsVariableOrConstant(E)) continue;
+
+    // Due to the way we check dominance for factors we need to use non-strict
+    // dominance if both operands a factors
+    if (!NotStrictlyDominates(E, Use)) return false;
+  }
+
+  return true;
+}
+
+bool SSAPRE::
+OperandsDominateStrictly(const Expression *Def, const Expression *Use) {
   for (auto &O : VExprToInst[Def]->operands()) {
     auto E = ValueToExp[O];
 
@@ -311,9 +334,23 @@ SetAllOperandsSave(Instruction *I) {
 void SSAPRE::
 AddSubstitution(Expression *E, Expression *S) {
   assert(E && S);
+  assert(ExprToPExpr[E] == ExprToPExpr[S] || S == GetBottom() &&
+      "Substituting expression must be of the same Proto or Bottom");
+
+  auto *PE = ExprToPExpr[E];
+  if (!PE)
+    PE = E;
+
+  assert(PE);
+
+  if (!Substitutions.count(PE)) {
+    Substitutions.insert({PE, ExpExpMap()});
+  }
+
+  auto &MA = Substitutions[PE];
 
   if (E == S) {
-    Substitutions[E] = S;
+    MA[E] = S;
     return;
   }
 
@@ -329,19 +366,49 @@ AddSubstitution(Expression *E, Expression *S) {
       // Saves are useless for F
       !FactorExpression::classof(S) &&
       // Only if this is the first time we add this substitution
-      Substitutions[E] != S) {
+      MA[E] != S) {
     S->addSave();
   }
 
-  Substitutions[E] = S;
+  MA[E] = S;
 }
 
 Expression * SSAPRE::
-GetSubstitution(Expression *E) {
+GetSubstitution(Expression *E, bool Direct) {
   assert(E);
-  while (E != Substitutions[E])
-    E = Substitutions[E];
+
+  auto PE = ExprToPExpr[E];
+  if (!PE) PE = E;
+  if (!Substitutions.count(PE)) {
+    llvm_unreachable("well..");
+  }
+  auto &MA = Substitutions[PE];
+
+  if (Direct) {
+    auto S = MA[E];
+    if (S) return S;
+    return E;
+  }
+
+  while (auto EE = MA[E]) {
+    assert(EE && "Must not be null");
+    if (EE == GetBottom()) return EE;
+    if (E == EE) return E;
+    E = EE;
+  }
+
   return E;
+}
+
+void SSAPRE::
+RemSubstitution(Expression *E) {
+  assert(E);
+
+  auto PE = ExprToPExpr[E];
+  assert(PE);
+
+  if (Substitutions.count(PE))
+    Substitutions[PE].erase(E);
 }
 
 Value * SSAPRE::
@@ -368,14 +435,12 @@ void SSAPRE::
 AddExpression(Expression *PE, Expression *VE, Instruction *I, BasicBlock *B) {
   assert(PE && VE && I && B);
 
-  AddSubstitution(VE, VE);
-
   ExpToValue[VE] = I;
   ValueToExp[I] = VE;
 
   InstToVExpr[I] = VE;
   VExprToInst[VE] = I;
-  VExprToPExpr[VE] = PE;
+  ExprToPExpr[VE] = PE;
 
   if (!PExprToVExprs.count(PE)) {
     PExprToVExprs.insert({PE, {VE}});
@@ -394,21 +459,32 @@ AddExpression(Expression *PE, Expression *VE, Instruction *I, BasicBlock *B) {
   } else {
     PExprToBlocks[PE].insert(B);
   }
+
+  // Must be the last
+  AddSubstitution(VE, VE);
 }
 
 void SSAPRE::
 AddFactor(FactorExpression *FE, const Expression *PE, const BasicBlock *B) {
   assert(FE && PE && B);
+  assert(FE != PE);
   FE->setPExpr(PE);
+  ExprToPExpr[FE] = PE;
   FactorToBlock[FE] = B;
   BlockToFactors[B].push_back(FE);
   FExprs.insert(FE);
+
+  // Must be the last
   AddSubstitution(FE, FE);
 }
 
 void SSAPRE::
 KillFactor(FactorExpression *F) {
   assert(F);
+
+  // Must be the first
+  AddSubstitution(F, GetBottom());
+
   auto &B = FactorToBlock[F];
   auto &V = BlockToFactors[B];
   for (auto VS = V.begin(), VV = V.end(); VS != VV; ++VS) {
@@ -420,6 +496,7 @@ KillFactor(FactorExpression *F) {
   FExprs.erase(F);
   VExprToInst.erase(F);
   ExpToValue.erase(F);
+  // ExprToPExpr.erase(F);
 
   if (F->getIsMaterialized()) {
     F->setIsMaterialized(false);
@@ -431,8 +508,6 @@ KillFactor(FactorExpression *F) {
     auto E = CreateExpression(*PHI);
     AddExpression(E, E, PHI, PHI->getParent());
   }
-
-  AddSubstitution(F, GetBottom());
 }
 
 void SSAPRE::
@@ -443,7 +518,7 @@ MaterializeFactor(FactorExpression *FE, PHINode *PHI) {
 
   // These may not exist if we just materialized the phi
   auto PVE = InstToVExpr[PHI];
-  auto PPE = VExprToPExpr[PVE];
+  auto PPE = ExprToPExpr[PVE];
   if (PPE) {
     // We need to remove anything related to this PHIs original prototype,
     // because before we verified that this PHI is actually a Factor it was based
@@ -458,12 +533,12 @@ MaterializeFactor(FactorExpression *FE, PHINode *PHI) {
   }
 
   if (PVE) {
-    Substitutions.erase(PVE);
+    RemSubstitution(PVE);
 
     // Erase all memory of it
     ExpToValue.erase(PVE);
     VExprToInst.erase(PVE);
-    VExprToPExpr.erase(PVE);
+    ExprToPExpr.erase(PVE);
 
     ExpressionAllocator.Deallocate(PVE);
   }
@@ -474,7 +549,7 @@ MaterializeFactor(FactorExpression *FE, PHINode *PHI) {
 
   InstToVExpr[PHI] = FE;
   VExprToInst[FE] = PHI;
-  VExprToPExpr[FE] = FE;
+  // ExprToPExpr[FE] = FE;
 
   ExpToValue[FE] = PHI;
   ValueToExp[PHI] = FE;
@@ -490,15 +565,23 @@ ReplaceFactor(FactorExpression *FE, Expression *VE) {
   // Replace all Factor uses. Note that we do not add Save for each Factor use,
   // because Factors do not use their operands before they're materialized, or
   // in case of already materialized not-removed during CodeMotion step.
-  for (auto F : FExprs) {
+  auto List = FExprs; // Can be modified insdie the cycle
+  for (auto F : List) {
     if (F == FE) continue;
     for (auto BB : F->getPreds()) {
       if (F->getVExpr(BB) == FE) {
         F->setVExpr(BB, VE);
 
         // If we assign the same version we create a cycle
-        if (F->getVersion() == VE->getVersion())
-          F->setIsCycle(true);
+        if (F->getVersion() == VE->getVersion()) {
+          // Assigning this VE as operand makes it induction expression, yikes.
+          // In this case just kill this F right away
+          if (IsInductionExpression(F, VE)) {
+            KillFactor(F);
+          } else {
+            F->setIsCycle(true);
+          }
+        }
       }
     }
   }
@@ -516,11 +599,11 @@ ReplaceFactor(FactorExpression *FE, Expression *VE) {
   if (IsVersionUnset(VE))
     VE->setVersion(FE->getVersion());
 
-  KillFactor(FE);
-
   // We stiil need this link, because other instructions can reference this
   // Factor, not only its versions.
   AddSubstitution(FE, VE);
+
+  KillFactor(FE);
 }
 
 void SSAPRE::
@@ -532,6 +615,8 @@ ReplaceMaterializedFactor(FactorExpression * FE, Expression * VE) {
 
   // Add save for every real use of this PHI
   auto PHI = (PHINode *)FactorToPHI[FE];
+  if (VE == GetBottom()) { assert(AllUsersKilled(PHI)); }
+
   for (auto U : PHI->users()) {
 
     auto UI = (Instruction *)U;
@@ -794,14 +879,14 @@ CreatePHIExpression(PHINode &I) {
 FactorExpression *SSAPRE::
 CreateFactorExpression(const Expression &PE, const BasicBlock &B) {
   auto FE = new (ExpressionAllocator) FactorExpression(B);
-  size_t C = 0;
 
   // The order we add these blocks is not important, since these blocks only
   // used to get proper Operands and Versions out of the Expression.
   for (auto S = pred_begin(&B), EE = pred_end(&B); S != EE; ++S) {
-    FE->addPred((BasicBlock *)*S, C++);
+    FE->addPred((BasicBlock *)*S, FE->getVExprNum());
   }
   FE->setPExpr(&PE);
+  ExprToPExpr[FE] = &PE;
 
   return FE;
 }
@@ -1000,12 +1085,17 @@ public:
   PHIFactorMap_t
   GetLiveFactors() {
     // Erase all killed Factors before returning the Map
+    DEBUG(dbgs() << "\n\nKilledNonLiveFactors");
+    DEBUG(dbgs() << "\n---------------------------");
     for (auto P : SrcKillMap) {
       if (P.getSecond()) {
+        DEBUG(dbgs() << "\n");
+        DEBUG(P.getFirst()->print(dbgs()));
         O.ExpressionAllocator.Deallocate(P.getFirst());
         PHIFactorMap.erase(P.getFirst());
       }
     }
+    DEBUG(dbgs() << "\n---------------------------\n");
     return PHIFactorMap;
   }
 
@@ -1030,7 +1120,7 @@ public:
   FinishPropagation(Token_t T, const PHINode *PHI) {
     assert(!SrcKillMap[PHI] && "The Factor is already killed");
 
-    PHITokenMap.insert({PHI, T});
+    PHITokenMap[PHI] = T;
 
     // Either Top or Bottom results in deletion of the Factor
     if (IsTopOrBottomTok(T)) {
@@ -1194,7 +1284,7 @@ Fini() {
 
   InstToVExpr.clear();
   VExprToInst.clear();
-  VExprToPExpr.clear();
+  ExprToPExpr.clear();
   PExprToVersions.clear();
   PExprToInsts.clear();
   PExprToBlocks.clear();
@@ -1299,7 +1389,7 @@ FactorInsertion() {
           continue;
         // Otherwise we use whatever this VE is prototyped by
         } else {
-          TOK = CalculateToken(TOK, VExprToPExpr[OVE]);
+          TOK = CalculateToken(TOK, ExprToPExpr[OVE]);
           NonBottomArgs.insert(OVE);
           continue;
         }
@@ -1315,7 +1405,8 @@ FactorInsertion() {
           // bottoms' origin blocks. The second term is a special case for
           // cycles, if VE is a back-branch we can still use this PHI as a
           // Factor.
-          if (!OperandsDominate(VE, T) && !DT->dominates(PHI, VExprToInst[VE])) {
+          if (!OperandsDominate(VE, T) &&
+              !DT->dominates(PHI, VExprToInst[VE])) {
             TOK = GetBotTok();
             break;
           }
@@ -1372,6 +1463,8 @@ FactorInsertion() {
     for (unsigned i = 0, l = PHI->getNumOperands(); i < l; ++i) {
       auto B = PHI->getIncomingBlock(i);
       auto O = PHI->getOperand(i);
+
+      assert(!F->getVExpr(B) && "This is the switch case i was affraid of");
 
       if (auto OPHI = dyn_cast<PHINode>(O)) {
 
@@ -1433,7 +1526,7 @@ FactorInsertion() {
 
         for (auto &I : *BB) {
           auto OE = ValueToExp[&I];
-          auto OPE = VExprToPExpr[OE];
+          auto OPE = ExprToPExpr[OE];
 
           // If Proto of the occurance matches the PE we should insert here
           if (OPE == PE) {
@@ -1531,7 +1624,7 @@ Rename() {
     //   if (IsFactoredPHI(&I)) continue;
     //   if (&I == B->getFirstNonPHI()) break;
     //   auto &VE = InstToVExpr[&I];
-    //   auto &PE = VExprToPExpr[VE];
+    //   auto &PE = ExprToPExpr[VE];
     //   VE->setVersion(PExprToCounter[PE]++);
     // }
 
@@ -1560,7 +1653,7 @@ Rename() {
       if (PHINode::classof(&I)) continue;
 
       auto &VE = InstToVExpr[&I];
-      auto &PE = VExprToPExpr[VE];
+      auto &PE = ExprToPExpr[VE];
       auto SDFS = InstrSDFS[&I];
 
       // Backtrace every stacks if we jumped up the tree
@@ -1728,6 +1821,8 @@ Rename() {
           F->setVExpr(B, VE);
         }
 
+        assert(VE && "...");
+
         if (IsBottom(VE)) continue;
 
         // STEP 3 Init: HasRealUse
@@ -1818,14 +1913,34 @@ Rename() {
     }
   }
 
+  // TODO this whole induction thing is way too simple
+  // This maps induction expressions to its cycle head we could find so far. We
+  // gonna iterate over their users and add them too, deleting any using
+  // factors along the way.
+  struct Induction_t
+  {
+    const BasicBlock * H;
+    const Expression *PE;
+    Induction_t() = delete;
+    Induction_t(const BasicBlock *H, const Expression *PE)
+      : H(H), PE(PE) {}
+  };
+  SmallVector<Induction_t, 8> Inductions;
+
   // Determine cyclic Factors of whats left
   for (auto F : FExprs) {
 
     if (FactorKillList.count(F)) continue;
     for (auto VE : F->getVExprs()) {
 
-      // Factors with related inductive operands are useless
+      // Factors with related induction operands are useless, we cannot move
+      // them or change, so just kill'em.
+      // N.B. This collects the intial induction expression sets and related
+      // header blocks, the following computation will not add new header
+      // blocks but will find more induction expressions
       if (IsInductionExpression(F, VE)) {
+        auto H = FactorToBlock[F];
+        Inductions.push_back({H, ExprToPExpr[VE]});
         FactorKillList.insert(F);
         break;
       }
@@ -1834,6 +1949,27 @@ Rename() {
       // not change in the expression's operands along this cycle.
       if (F->getVersion() == VE->getVersion()) {
         F->setIsCycle(true);
+      }
+    }
+  }
+
+  for (unsigned i = 0, l = Inductions.size(); i < l; ++i) {
+    auto IM = Inductions[i];
+    auto IH = IM.H;
+    auto IPE = IM.PE;
+
+    for (auto F : BlockToFactors[IH]) {
+      auto FPE = F->getPExpr();
+      if (FPE == IPE) continue;
+
+      for (auto &FPO : FPE->getProto()->operands()) {
+        auto FPOE = ValueToExp[FPO];
+        if (IgnoreExpression(FPOE)) continue;
+        auto FPOPE = ExprToPExpr[FPOE];
+        if (FPOPE != IPE) continue;
+        FactorKillList.insert(F);
+        Inductions.push_back({IH, FPE}); l++;
+        break;
       }
     }
   }
@@ -1961,7 +2097,9 @@ void SSAPRE::
 ResetLater(FactorExpression *G) {
   G->setLater(false);
   for (auto F : FExprs) {
-    if (F->hasVExpr(G) && F->getLater())
+    // Checking for dominance is necessary to prevent update on back branch.
+    // Ignoring this may lead to True(WBA) of Half-Available Factor
+    if (NotStrictlyDominates(G, F) && F->hasVExpr(G) && F->getLater())
       ResetLater(F);
   }
 }
@@ -2005,15 +2143,14 @@ Finalize() {
 
     for (auto &I : *B) {
       auto VE = InstToVExpr[&I];
-      auto PE = VExprToPExpr[VE];
+      auto PE = ExprToPExpr[VE];
 
       // Linked PHI nodes are ignored, their Factors are processed separately
-      if (IsFactoredPHI(&I)) continue;
+      // if (IsFactoredPHI(&I)) continue;
 
       // Traverse operands and add Save count to theirs definitions
       for (auto &O : I.operands()) {
         if (auto &E = ValueToExp[O]) {
-          if (BasicExpression::classof(E))
             E->addSave();
         }
       }
@@ -2079,15 +2216,8 @@ FactorGraphWalk() {
 
         // Cycled side is never used
         if (!FE->getHasRealUse(CE) && !FE->getDownSafe()) {
-          // If it was already materialized, kill the PHI
-          if (auto PHI = (PHINode *)FactorToPHI[FE]) {
-            assert(AllUsersKilled(PHI) && "Should not be like that");
-            KillList.push_back(PHI);
-          }
-
           ReplaceFactor(FE, GetBottom());
           Changed = true;
-
           continue;
         }
 
@@ -2157,17 +2287,6 @@ FactorGraphWalk() {
           ReplaceMaterializedFactor(FE, VE);
 
           Changed = true;
-
-          // This PHI/Factor stays after all so we need to save all its
-          // operands
-        } else if (FE->getIsMaterialized()) {
-          for (auto VE : FE->getVExprs()) {
-            if (BasicExpression::classof(VE)) {
-              VE->addSave();
-            }
-          }
-          // The others are yet to be materialized
-        } else {
         }
 
         // Quick walk over Factor operands to check if we really need to
@@ -2210,17 +2329,59 @@ PHIInsertion() {
   typedef SmallVector<PHIPatch, 8> PHIPatchList;
   DenseMap<FactorExpression *, PHIPatchList> PHIPatches;
 
-  for (auto &P : BlockToFactors) {
-    auto &B = P.getFirst();
-
-    for (auto F : P.getSecond()) {
+  // top-down walk
+  SmallPtrSet<FactorExpression *, 32> FactorKillList;
+  for (auto B : *RPOT) {
+    for (auto F: BlockToFactors[B]) {
 
       // Nothing to do here
       if (F->getIsMaterialized()) continue;
 
+      // TODO
+      // We need to check whether all the arguments still present, if we
+      // encounter a bottom we cannot spawn this PHI. Generally this is not the
+      // best place for that, needs to be improved/moved.
+      bool Killed = false;
+      for (auto P : F->getPreds()) {
+        auto VE = F->getVExpr(P);
+        auto SE = GetSubstitution(VE);
+        if (SE == GetBottom()) {
+          FactorKillList.insert(F);
+          Killed = true;
+          break;
+        }
+
+        // Save the substitution
+        F->setVExpr(P, SE);
+      }
+
+      if (Killed) {
+        assert(!PHIPatches.count(F) && "Uh oh");
+        continue;
+      }
+
       IRBuilder<> Builder((Instruction *)B->getFirstNonPHI());
       auto BE = dyn_cast<BasicExpression>(F->getPExpr());
       auto PHI = Builder.CreatePHI(BE->getType(), F->getVExprNum());
+
+      // Fill-in PHI operands
+      for (auto P : F->getPreds()) {
+        auto VE = F->getVExpr(P);
+
+        // If the operand is still non-materialized Factor we create a patch
+        // point
+        auto FF = dyn_cast<FactorExpression>(VE);
+        if (FF && !FF->getIsMaterialized()) {
+          if (!PHIPatches.count(FF)) PHIPatches.insert({FF, {}});
+          PHIPatches[FF].push_back({PHI, P});
+        } else {
+          auto I = VExprToInst[VE];
+          PHI->addIncoming(I, P);
+        }
+
+        // Add Save for each operand, since this Factor is live now
+        VE->addSave();
+      }
 
       // If there is a patch point awaiting this PHI
       if (PHIPatches.count(F)) {
@@ -2231,32 +2392,14 @@ PHIInsertion() {
         }
       }
 
-      // Fill-in PHI operands
-      for (auto P : F->getPreds()) {
-        auto VE = F->getVExpr(P);
-        auto SE = GetSubstitution(VE);
-
-        // If the operand is still non-materialized Factor we create a patch
-        // point
-        auto FF = dyn_cast<FactorExpression>(SE);
-        if (FF && !FF->getIsMaterialized()) {
-          if (!PHIPatches.count(FF)) PHIPatches.insert({FF, {}});
-          PHIPatches[FF].push_back({PHI, P});
-        } else {
-          auto I = VExprToInst[SE];
-          PHI->addIncoming(I, P);
-        }
-
-        // Add Save for each operand, since this Factor is live now
-        if (BasicExpression::classof(SE)) {
-          SE->addSave();
-        }
-      }
-
       // Make Factor Expression point to a real PHI
       MaterializeFactor(F, PHI);
       Changed = true;
     }
+  }
+
+  for (auto F : FactorKillList) {
+    KillFactor(F);
   }
 
   return Changed;
@@ -2328,7 +2471,7 @@ ApplySubstitutions() {
     // If this instruction does not have real use we subtract one Save from its
     // DIRECT sub
     if (RealUses == 0) {
-      auto DS = Substitutions[VE];
+      auto DS = GetSubstitution(VE, true);
       DS->remSave();
       if (!DS->getSave() && !IsToBeKilled(DS)) {
         KillList.push_back(VExprToInst[DS]);
@@ -2358,18 +2501,14 @@ KillEmAll() {
   for (unsigned i = 0, l = KillList.size(); i < l; ++i) {
     auto I = KillList[i];
 
-    for (auto U : I->users()) {
-      assert(AllUsersKilled((Instruction *)U) &&
-          "This instructin must not have any uses except PHIs");
-    }
+    assert(AllUsersKilled(I) && "Should not be used by live instructions");
 
     // Decrease usage count of the instruction's operands
     for (auto &O : I->operands()) {
       if (auto &OE = ValueToExp[O]) {
         if (IgnoreExpression(OE)) continue;
-        bool AlreadyInKill = !OE->getSave();
         OE->remSave();
-        if (!AlreadyInKill && !OE->getSave()) {
+        if (!OE->getSave()) {
           KillList.push_back(VExprToInst[OE]);
           l++;
         }
@@ -2460,7 +2599,7 @@ PrintDebug(const std::string &Caption) {
       dbgs() << "\n\t\t\t\t\t\t\t\t";
       dbgs() << (I->getParent() ? "(l)" : "(d)");
       dbgs() << " (" << InstrDFS[I]<< ") ";
-      VE->printInternal(dbgs());
+      VE->dump();
     }
     dbgs() << "\n";
   }
@@ -2482,43 +2621,72 @@ PrintDebug(const std::string &Caption) {
 
   dbgs() << "\nSubstitutions";
   dbgs() << "\n---------------------------\n";
-  for (auto &P : Substitutions) {
-    auto VE = P.getFirst();
-    auto VI = VExprToInst[VE];
-    auto SE = P.getSecond();
-    auto SI = VExprToInst[SE];
+  bool UseSeparator = true;
+  bool PrintHeader = true;
+  for (auto &PP : Substitutions) {
+    auto PE = PP.getFirst();
+    auto &MA = PP.getSecond();
 
-    if (!VE) continue;
-    if (IgnoreExpression(VE)) continue;
-    if (VI && !VI->getParent()) continue;
+    if (!MA.size()) continue;
 
-    if (VI) {
-      VI->print(dbgs());
-    } else if (auto FE = dyn_cast<FactorExpression>(VE)) {
-      dbgs() << "  Factor V: " << FE->getVersion() << ", PE: " << FE->getPExpr();
-    } else if (VE == GetBottom()) {
-      continue;
-    } else {
-      llvm_unreachable("Must not be the case");
-    }
+    for (auto P : MA) {
+      auto VE = P.getFirst();
+      auto VI = VExprToInst[VE];
+      auto SE = P.getSecond();
+      auto SI = VExprToInst[SE];
 
-    dbgs() << " -> ";
-    if (VE == SE) {
-      dbgs() << "-";
-    } else if (SE == GetBottom()) {
-      dbgs() << "⊥";
-    } else if (auto FE = dyn_cast<FactorExpression>(SE)) {
-      if (FE->getIsMaterialized() && FactorToPHI[FE]->getParent()) {
-        FactorToPHI[FE]->print(dbgs());
-      } else {
-      dbgs() << "Factor V: " << FE->getVersion() << ", PE: " << FE->getPExpr();
+      if (!VE) continue;
+      if (VE == GetBottom()) continue;
+      if (IgnoreExpression(VE)) continue;
+      if (VI && !VI->getParent()) continue;
+
+      if (PrintHeader) {
+        dbgs() << "PE: " << (void *)PE << "\n";
+        PrintHeader = false;
       }
-    } else if (!SI->getParent()) {
-      dbgs() << "(deleted)";
-    } else {
-      SI->print(dbgs());
+
+      if (auto FE = dyn_cast<FactorExpression>(VE)) {
+        if (FE->getIsMaterialized() && FactorToPHI[FE]->getParent()) {
+          dbgs() << "(F)";
+          FactorToPHI[FE]->print(dbgs());
+        } else {
+          dbgs() << "     Factor V: " << FE->getVersion()
+                 << ", MAT: " << (FE->getIsMaterialized() ? "T" : "F")
+                 << ", PE: " << FE->getPExpr();
+        }
+      } else if (VI) {
+        dbgs() << "(I)";
+        VI->print(dbgs());
+      } else {
+        llvm_unreachable("Must not be the case");
+      }
+
+      dbgs() << " -> ";
+      if (VE == SE) {
+        dbgs() << "-";
+      } else if (SE == GetBottom()) {
+        dbgs() << "⊥";
+      } else if (auto FE = dyn_cast<FactorExpression>(SE)) {
+        if (FE->getIsMaterialized() && FactorToPHI[FE]->getParent()) {
+          dbgs() << "(F) ";
+          FactorToPHI[FE]->print(dbgs());
+        } else {
+          dbgs() << "     Factor V: " << FE->getVersion()
+                 << ", MAT: " << (FE->getIsMaterialized() ? "T" : "F")
+                 << ", PE: " << FE->getPExpr();
+        }
+      } else if (!SI->getParent()) {
+        dbgs() << "(deleted)";
+      } else {
+        SI->print(dbgs());
+      }
+      dbgs() << "\n";
     }
-    dbgs() << "\n";
+
+    if (UseSeparator && !PrintHeader) {
+      PrintHeader = true;
+      dbgs() << "\n";
+    }
   }
 
   dbgs() << "\nKillList";
@@ -2552,6 +2720,8 @@ runImpl(Function &F,
   NumFuncArgs = F.arg_size();
 
   RPOT = new ReversePostOrderTraversal<Function *>(&F);
+
+  DEBUG(F.dump());
 
   Init(F);
 
