@@ -2369,13 +2369,17 @@ PHIInsertion() {
       }
 
       if (Killed) {
-        assert(!PHIPatches.count(F) && "Uh oh");
+        assert(PHIPatches.count(F) == 0 && "Uh oh");
+        AddSubstitution(F, GetBottom());
         continue;
       }
 
       IRBuilder<> Builder((Instruction *)B->getFirstNonPHI());
       auto BE = dyn_cast<BasicExpression>(F->getPExpr());
       auto PHI = Builder.CreatePHI(BE->getType(), F->getVExprNum());
+      PHI->setName("ssapre_phi");
+
+      assert(F->getVExprNum() > 1);
 
       // Fill-in PHI operands
       for (auto P : F->getPreds()) {
@@ -2383,10 +2387,10 @@ PHIInsertion() {
 
         // If the operand is still non-materialized Factor we create a patch
         // point
-        auto FF = dyn_cast<FactorExpression>(VE);
-        if (FF && !FF->getIsMaterialized()) {
-          if (!PHIPatches.count(FF)) PHIPatches.insert({FF, {}});
-          PHIPatches[FF].push_back({PHI, P});
+        auto FVE = dyn_cast<FactorExpression>(VE);
+        if (FVE && !FVE->getIsMaterialized()) {
+          if (!PHIPatches.count(FVE)) PHIPatches.insert({FVE, {}});
+          PHIPatches[FVE].push_back({PHI, P});
         } else {
           auto I = VExprToInst[VE];
           PHI->addIncoming(I, P);
