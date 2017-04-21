@@ -678,6 +678,7 @@ private:
 
   // Check whether Expression operands' definitions dominate the Factor
   bool OperandsDominate(const Expression *E, const Expression *F);
+  bool OperandsDominate(const Instruction *I, const Expression *F);
 
   bool OperandsDominateStrictly(const Expression *E, const Expression *F);
 

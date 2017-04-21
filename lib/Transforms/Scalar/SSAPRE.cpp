@@ -162,10 +162,14 @@ NotStrictlyDominates(const Expression *Def, const Expression *Use) {
 
   return DT->dominates(IDef, IUse);
 }
-
 bool SSAPRE::
 OperandsDominate(const Expression *Def, const Expression *Use) {
-  for (auto &O : VExprToInst[Def]->operands()) {
+  return OperandsDominate(VExprToInst[Def], Use);
+}
+
+bool SSAPRE::
+OperandsDominate(const Instruction *I, const Expression *Use) {
+  for (auto &O : I->operands()) {
     auto E = ValueToExp[O];
 
     // Variables or Constants occurs indefinitely before any expression
@@ -2279,9 +2283,11 @@ FactorGraphWalk() {
 
           Changed = true;
 
-          // If Mat and Later this Factor is useless and we replace it with a real
-          // computation
-        } else if (FE->getIsMaterialized() && FE->getLater()) {
+          // If Mat and Later this Factor is useless and we replace it with a
+          // real computation
+        } else if (FE->getIsMaterialized() && FE->getLater() &&
+            // Make sure this new instruction's operands will dominate this PHI
+            OperandsDominate(PE->getProto(), FE)) {
           auto I = PE->getProto()->clone();
 
           auto VE = CreateExpression(*I);
@@ -2296,8 +2302,8 @@ FactorGraphWalk() {
           Changed = true;
         }
 
-        // Quick walk over Factor operands to check if we really need to
-        // insert it, it is possible that the operands are all the same.
+        // Quick walk over Factor operands to check if we really need to insert
+        // it, it is possible that the operands are all the same.
         if (!FE->getIsMaterialized() && FE->getWillBeAvail()) {
           Expression * O = nullptr;
           bool Same = true;
