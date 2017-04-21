@@ -117,10 +117,17 @@ IsFactoredPHI(Instruction *I) {
 
 const Instruction * SSAPRE::
 GetDomRepresentativeInstruction(const Expression * E) {
+  // There is a certain dominance trickery with factored and non-factored PHIs.
+  // The factored PHIs always dominate non-factored ones, in this regard plain
+  // PHIs treated as a regular instructions.
   if (auto FE = dyn_cast<FactorExpression>(E)) {
-    return &FactorToBlock[FE]->front();
+    auto BB = (BasicBlock *)FactorToBlock[FE];
+    auto DN = DT->getNode(BB);
+    auto PB = DN->getIDom()->getBlock();
+    return PB->getTerminator();
   } else if (auto PHIE = dyn_cast<PHIExpression>(E)) {
-    return &VExprToInst[PHIE]->getParent()->front();
+    auto BB = VExprToInst[PHIE]->getParent();
+    return &BB->front();
   }
 
   return VExprToInst[E];
