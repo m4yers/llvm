@@ -581,18 +581,18 @@ ReplaceFactor(FactorExpression *FE, Expression *VE) {
   for (auto F : List) {
     if (F == FE) continue;
     for (auto BB : F->getPreds()) {
-      if (F->getVExpr(BB) == FE) {
-        F->setVExpr(BB, VE);
+      if (F->getVExpr(BB) != FE) continue;
 
-        // If we assign the same version we create a cycle
-        if (F->getVersion() == VE->getVersion()) {
-          // Assigning this VE as operand makes it induction expression, yikes.
-          // In this case just kill this F right away
-          if (IsInductionExpression(F, VE)) {
-            KillFactor(F);
-          } else {
-            F->setIsCycle(true);
-          }
+      F->setVExpr(BB, VE);
+
+      // If we assign the same version we create a cycle
+      if (F->getVersion() == VE->getVersion()) {
+        // Assigning this VE as operand makes it induction expression, yikes.
+        // In this case just kill this F right away
+        if (IsInductionExpression(F, VE)) {
+          KillFactor(F);
+        } else {
+          F->setIsCycle(true);
         }
       }
     }
@@ -2324,9 +2324,12 @@ PHIInsertion() {
   DenseMap<FactorExpression *, PHIPatchList> PHIPatches;
 
   // top-down walk
-  SmallPtrSet<FactorExpression *, 32> FactorKillList;
   for (auto B : *RPOT) {
-    for (auto F: BlockToFactors[B]) {
+    if (B->getName().contains("420")) {
+      dbgs() << "HERE";
+    }
+    auto List = BlockToFactors[B];
+    for (auto F : List) {
 
       // Nothing to do here
       if (F->getIsMaterialized()) continue;
@@ -2347,8 +2350,17 @@ PHIInsertion() {
 
       // If all the ops are the same just use it
       if (Same) {
-        FactorKillList.insert(F);
-        AddSubstitution(F, O);
+        ReplaceFactor(F, O);
+
+        // If there is a patch point awaiting this PHI
+        auto OI = (Value *)ExpToValue[O];
+        if (PHIPatches.count(F)) {
+          for (auto &PP : PHIPatches[F]) {
+            auto PPHI = PP.first;
+            auto PB = PP.second;
+            PPHI->addIncoming(OI, PB);
+          }
+        }
         continue;
       }
 
@@ -2361,7 +2373,6 @@ PHIInsertion() {
         auto VE = F->getVExpr(P);
         auto SE = GetSubstitution(VE);
         if (SE == GetBottom()) {
-          FactorKillList.insert(F);
           Killed = true;
           break;
         }
@@ -2372,7 +2383,7 @@ PHIInsertion() {
 
       if (Killed) {
         assert(PHIPatches.count(F) == 0 && "Uh oh");
-        AddSubstitution(F, GetBottom());
+        ReplaceFactor(F, GetBottom());
         continue;
       }
 
@@ -2415,10 +2426,6 @@ PHIInsertion() {
       MaterializeFactor(F, PHI);
       Changed = true;
     }
-  }
-
-  for (auto F : FactorKillList) {
-    KillFactor(F, false);
   }
 
   return Changed;
