@@ -715,7 +715,7 @@ private:
                      BasicBlock *B);
 
   void AddFactor(FactorExpression *FE, const Expression *PE, const BasicBlock *B);
-  void KillFactor(FactorExpression *);
+  void KillFactor(FactorExpression *, bool BottomSubstitute = true);
   void MaterializeFactor(FactorExpression *FE, PHINode *PHI);
   void ReplaceFactor(FactorExpression * FE, Expression * E);
   void ReplaceMaterializedFactor(FactorExpression * FE, Expression * E);

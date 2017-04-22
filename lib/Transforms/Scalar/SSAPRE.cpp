@@ -490,11 +490,12 @@ AddFactor(FactorExpression *FE, const Expression *PE, const BasicBlock *B) {
 }
 
 void SSAPRE::
-KillFactor(FactorExpression *F) {
+KillFactor(FactorExpression *F, bool BottomSubstitute) {
   assert(F);
 
   // Must be the first
-  AddSubstitution(F, GetBottom());
+  if (BottomSubstitute)
+    AddSubstitution(F, GetBottom());
 
   auto &B = FactorToBlock[F];
   auto &V = BlockToFactors[B];
@@ -2110,7 +2111,7 @@ ResetLater(FactorExpression *G) {
   for (auto F : FExprs) {
     // Checking for dominance is necessary to prevent update on back branch.
     // Ignoring this may lead to True(WBA) of Half-Available Factor
-    if (NotStrictlyDominates(G, F) && F->hasVExpr(G) && F->getLater())
+    if (F->hasVExpr(G) && F->getLater() && NotStrictlyDominates(G, F))
       ResetLater(F);
   }
 }
@@ -2301,26 +2302,6 @@ FactorGraphWalk() {
 
           Changed = true;
         }
-
-        // Quick walk over Factor operands to check if we really need to insert
-        // it, it is possible that the operands are all the same.
-        if (!FE->getIsMaterialized() && FE->getWillBeAvail()) {
-          Expression * O = nullptr;
-          bool Same = true;
-          for (auto P : FE->getVExprs()) {
-            if (O && O != P) {
-              Same = false;
-              break;
-            }
-            O = P;
-          }
-
-          // If all the ops are the same just use it
-          if (Same) {
-            ReplaceFactor(FE, O);
-            Changed = true;
-          }
-        }
       }
 
       // Kill non-materializd factors
@@ -2349,6 +2330,27 @@ PHIInsertion() {
 
       // Nothing to do here
       if (F->getIsMaterialized()) continue;
+
+
+      // Quick walk over Factor operands to check if we really need to insert
+      // it, it is possible that the operands are all the same.
+      Expression * O = nullptr;
+      bool Same = true;
+      for (auto P : F->getVExprs()) {
+        auto PS = GetSubstitution(P);
+        if (O && O != PS) {
+          Same = false;
+          break;
+        }
+        O = PS;
+      }
+
+      // If all the ops are the same just use it
+      if (Same) {
+        FactorKillList.insert(F);
+        AddSubstitution(F, O);
+        continue;
+      }
 
       // TODO
       // We need to check whether all the arguments still present, if we
@@ -2416,7 +2418,7 @@ PHIInsertion() {
   }
 
   for (auto F : FactorKillList) {
-    KillFactor(F);
+    KillFactor(F, false);
   }
 
   return Changed;
