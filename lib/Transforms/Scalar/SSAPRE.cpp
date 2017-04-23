@@ -388,6 +388,9 @@ Expression * SSAPRE::
 GetSubstitution(Expression *E, bool Direct) {
   assert(E);
 
+  if (VariableExpression::classof(E) || ConstantExpression::classof(E))
+    return E;
+
   auto PE = ExprToPExpr[E];
   if (!PE) PE = E;
   if (!Substitutions.count(PE)) {
@@ -517,8 +520,9 @@ KillFactor(FactorExpression *F, bool BottomSubstitute) {
     FactorToPHI[F] = nullptr;
 
     // Replace the FactorExpression with a regular PHIExpression
+    auto P = CreateExpression(*PHI);
     auto E = CreateExpression(*PHI);
-    AddExpression(E, E, PHI, PHI->getParent());
+    AddExpression(P, E, PHI, PHI->getParent());
   }
 }
 
@@ -552,6 +556,12 @@ MaterializeFactor(FactorExpression *FE, PHINode *PHI) {
     VExprToInst.erase(PVE);
     ExprToPExpr.erase(PVE);
 
+    // If there is a Factor that uses this PHI as operand
+    for (auto F : FExprs) {
+      if (F->hasVExpr(PVE))
+        F->replaceVExpr(PVE, FE);
+    }
+
     ExpressionAllocator.Deallocate(PVE);
   }
 
@@ -569,6 +579,60 @@ MaterializeFactor(FactorExpression *FE, PHINode *PHI) {
 
 void SSAPRE::
 ReplaceFactor(FactorExpression *FE, Expression *VE) {
+  if (FE->getIsMaterialized())
+    ReplaceFactorMaterialized(FE, VE);
+  else
+    ReplaceFactorFinalize(FE, VE);
+}
+
+void SSAPRE::
+ReplaceFactorMaterialized(FactorExpression * FE, Expression * VE) {
+  assert(FE && VE);
+
+  // We want the most recent expression
+  VE = GetSubstitution(VE);
+
+  bool IsBottom = VE == GetBottom();
+
+  // Add save for every real use of this PHI
+  auto PHI = (PHINode *)FactorToPHI[FE];
+
+  for (auto U : PHI->users()) {
+
+    auto UI = (Instruction *)U;
+    auto UE  = InstToVExpr[UI];
+
+    if (IsBottom && !IsToBeKilled (UI) && !FactorExpression::classof(UE)) {
+      llvm_unreachable("You cannot replace Factor with Bottom \
+                        for a regular non-factored instruction");
+    }
+
+    // Skip istructions without parents, unless they are to be inserted
+    if (!UI->getParent()) continue;
+
+    VE->addSave();
+  }
+
+  // Replace all PHI uses with a real instruction result only
+  if (!IsBottom) {
+    auto V = GetSubstituteValue(VE);
+    PHI->replaceAllUsesWith(V);
+  }
+
+  FE->setIsMaterialized(false);
+  PHIToFactor[PHI] = nullptr;
+  FactorToPHI[FE] = nullptr;
+
+  // Push this PHI into the kill-list, its operands won't be processed during
+  // kill time, since it is/was a factored expression
+  KillList.push_back(PHI);
+
+  // The rest is the same as for non-materialized Factor
+  ReplaceFactorFinalize(FE, VE);
+}
+
+void SSAPRE::
+ReplaceFactorFinalize(FactorExpression *FE, Expression *VE) {
   assert(FE && VE);
 
   // We want the most recent expression
@@ -611,54 +675,11 @@ ReplaceFactor(FactorExpression *FE, Expression *VE) {
   if (IsVersionUnset(VE))
     VE->setVersion(FE->getVersion());
 
+  KillFactor(FE, false);
+
   // We stiil need this link, because other instructions can reference this
   // Factor, not only its versions.
   AddSubstitution(FE, VE);
-
-  KillFactor(FE);
-}
-
-void SSAPRE::
-ReplaceMaterializedFactor(FactorExpression * FE, Expression * VE) {
-  assert(FE && VE);
-
-  // We want the most recent expression
-  VE = GetSubstitution(VE);
-
-  // Add save for every real use of this PHI
-  auto PHI = (PHINode *)FactorToPHI[FE];
-  if (VE == GetBottom()) { assert(AllUsersKilled(PHI)); }
-
-  for (auto U : PHI->users()) {
-
-    auto UI = (Instruction *)U;
-
-    // Skip istructions without parents, unless they are to be inserted
-    if (!UI->getParent()) continue;
-
-    // NOTE
-    // Since this method is called during bottom-up walk the factor graph we
-    // make sure we have a real use of this VE, either by a real expression or
-    // already materialized PHI that won't be deleted after.
-    // auto UE = InstToVExpr[UI];
-    // if (auto FE = dyn_cast<FactorExpression>(UE)) {
-    //   if (!FE->getIsMaterialized() && !FE->getWillBeAvail())
-    //     continue;
-    // }
-
-    VE->addSave();
-  }
-
-  // Replace all PHI uses
-  auto V = GetSubstituteValue(VE);
-  PHI->replaceAllUsesWith(V);
-
-  // Push this PHI into the kill-list, its operands won't be processed during
-  // kill time, since it is/was a factored expression
-  KillList.push_back(PHI);
-
-  // The rest is the same as for non-materialized Factor
-  ReplaceFactor(FE, VE);
 }
 
 unsigned int SSAPRE::
@@ -696,6 +717,7 @@ FillInBasicExpressionInfo(Instruction &I, BasicExpression *E) {
 
   bool AllConstant = true;
 
+  // ??? This is a bit weird, do i actually need this?
   if (auto *GEP = dyn_cast<GetElementPtrInst>(&I)) {
     E->setType(GEP->getSourceElementType());
   } else {
@@ -808,6 +830,8 @@ CreateBasicExpression(Instruction &I) {
     if (ShouldSwapOperands(E->getOperand(0), E->getOperand(1)))
       E->swapOperands(0, 1);
   }
+
+  return E;
 
   // Perform simplificaiton
   // We do not actually require simpler instructions but rather require them be
@@ -2202,8 +2226,8 @@ FactorGraphWalk() {
   // bottom-up processing
   for (auto BS = JoinBlocks.rbegin(), BE = JoinBlocks.rend(); BS != BE; ++BS) {
     auto B = (BasicBlock *)*BS;
-    auto Factors = BlockToFactors[B];
-    for (auto FE : Factors) {
+    auto List = BlockToFactors[B];
+    for (auto FE : List) {
       auto PE = (Expression *)FE->getPExpr();
 
       if (FE->getIsCycle()) {
@@ -2246,11 +2270,7 @@ FactorGraphWalk() {
           I->insertBefore(T);
         }
 
-        if (FE->getIsMaterialized()) {
-          ReplaceMaterializedFactor(FE, VE);
-        } else {
-          ReplaceFactor(FE, VE);
-        }
+        ReplaceFactor(FE, VE);
 
         Changed = true;
 
@@ -2298,7 +2318,7 @@ FactorGraphWalk() {
           SetAllOperandsSave(I);
           I->insertBefore((Instruction *)T);
 
-          ReplaceMaterializedFactor(FE, VE);
+          ReplaceFactor(FE, VE);
 
           Changed = true;
         }
@@ -2306,7 +2326,24 @@ FactorGraphWalk() {
 
       // Kill non-materializd factors
       if (!FE->getWillBeAvail() && !FE->getIsMaterialized()) {
-        KillFactor(FE);
+        ReplaceFactor(FE, GetBottom());
+        continue;
+      }
+
+      Expression * O = nullptr;
+      bool Same = true;
+      for (auto P : FE->getVExprs()) {
+        auto PS = GetSubstitution(P);
+        if (O && O != PS) {
+          Same = false;
+          break;
+        }
+        O = PS;
+      }
+
+      // If all the ops are the same just use it
+      if (Same) {
+        ReplaceFactor(FE, O);
       }
     }
   }
@@ -2325,9 +2362,6 @@ PHIInsertion() {
 
   // top-down walk
   for (auto B : *RPOT) {
-    if (B->getName().contains("420")) {
-      dbgs() << "HERE";
-    }
     auto List = BlockToFactors[B];
     for (auto F : List) {
 
@@ -2350,6 +2384,11 @@ PHIInsertion() {
 
       // If all the ops are the same just use it
       if (Same) {
+        if (O == GetBottom()) {
+          assert(PHIPatches.count(F) == 0 && "Uh oh");
+          continue;
+        }
+
         ReplaceFactor(F, O);
 
         // If there is a patch point awaiting this PHI
@@ -2361,6 +2400,7 @@ PHIInsertion() {
             PPHI->addIncoming(OI, PB);
           }
         }
+
         continue;
       }
 
@@ -2388,8 +2428,8 @@ PHIInsertion() {
       }
 
       IRBuilder<> Builder((Instruction *)B->getFirstNonPHI());
-      auto BE = dyn_cast<BasicExpression>(F->getPExpr());
-      auto PHI = Builder.CreatePHI(BE->getType(), F->getVExprNum());
+      auto TY = F->getPExpr()->getProto()->getType();
+      auto PHI = Builder.CreatePHI(TY, F->getVExprNum());
       PHI->setName("ssapre_phi");
 
       assert(F->getVExprNum() > 1);

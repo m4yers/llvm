@@ -634,7 +634,6 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
   // Store all the PHIs that are considered to be Factors at any point in the
   // pass. Useful during kill time to separate ordinal and factored phis, since
   // former do save their operands, but later do not.
-  DenseMap<PHINode *, bool> FactoredPHIs;
   SmallVector<Instruction *, 32> KillList;
 
 public:
@@ -717,8 +716,10 @@ private:
   void AddFactor(FactorExpression *FE, const Expression *PE, const BasicBlock *B);
   void KillFactor(FactorExpression *, bool BottomSubstitute = true);
   void MaterializeFactor(FactorExpression *FE, PHINode *PHI);
+
   void ReplaceFactor(FactorExpression * FE, Expression * E);
-  void ReplaceMaterializedFactor(FactorExpression * FE, Expression * E);
+  void ReplaceFactorMaterialized(FactorExpression * FE, Expression * E);
+  void ReplaceFactorFinalize(FactorExpression * FE, Expression * E);
 
   // This function provides global ranking of operations so that we can place
   // them in a canonical order.  Note that rank alone is not necessarily enough
