@@ -638,7 +638,7 @@ ReplaceFactorMaterialized(FactorExpression * FE, Expression * VE,
   KillList.push_back(PHI);
 
   // The rest is the same as for non-materialized Factor
-  ReplaceFactorFinalize(FE, VE, Direct);
+  ReplaceFactorFinalize(FE, VE, HRU, Direct);
 }
 
 void SSAPRE::
@@ -2129,7 +2129,7 @@ ComputeLater() {
   for (auto F : FExprs) {
     if (F->getLater()) {
       for (auto VE : F->getVExprs()) {
-        if (F->getHasRealUse(VE) && !IsBottom(VE)) {
+        if ((F->getHasRealUse(VE) || F->getIsCycle(VE)) && !IsBottom(VE)) {
           ResetLater(F);
           break;
         }
@@ -2144,7 +2144,7 @@ ResetLater(FactorExpression *G) {
   for (auto F : FExprs) {
     // Checking for dominance is necessary to prevent update on back branch.
     // Ignoring this may lead to True(WBA) of Half-Available Factor
-    if (F->hasVExpr(G) && F->getLater() && NotStrictlyDominates(G, F))
+    if (F->hasVExpr(G) && F->getLater() /* && NotStrictlyDominates(G, F) */)
       ResetLater(F);
   }
 }
@@ -2284,21 +2284,22 @@ FactorGraphWalk() {
 
         if (ShouldStay ||
 
-            // If this is a real PHI and it is used directly it must stay. Also
-            // this means that the non-cycled incoming values also play a role
-            // and must not be removed.
-            (IsBottomOrVarOrConst(VE) &&
-              FE->getIsMaterialized() &&
-              FactorToPHI[FE]->getNumUses() != 0)) {
+            // An incoming non-cycled expression that is not a real expression
+            // forces this one to stay; this is a conservative approach but
+            // with profiling this can change
+            ((FactorExpression::classof(VE) || IsBottomOrVarOrConst(VE)) &&
+
+             // And it must be a real phi and also has real uses
+             FE->getIsMaterialized() && FactorToPHI[FE]->getNumUses() != 0)) {
 
           // By this time these cycled expression will point to the Factor, but
           // since it stays we these expressions must stay as well.
           //
-          // N.B. This is where profiling would be useful, we can prove whether
-          // operands in these expressions dominate the factored phi and move
-          // them up the cycle, thus precomputing the values, but here we act
-          // conservatively and leave the expressions inside the cycle since
-          // we do not know if we ever enter it
+          // N.B.  This is where profiling would be useful, we can prove
+          // whether operands in these expressions dominate the factored phi
+          // and move them up the cycle, thus precomputing the values, but here
+          // we act conservatively and leave the expressions inside the cycle
+          // since we do not know if we ever enter it
           for (auto CE : CEV)  AddSubstitution(CE, CE, /* direct */ true);
           continue; // no further processing
         }

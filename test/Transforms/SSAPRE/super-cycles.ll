@@ -2,13 +2,16 @@
 target datalayout = "e-p:64:64:64-p1:16:16:16-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:32:64-f32:32:32-f64:64:64-v64:64:64-v128:128:128-a0:0:64-n8:16:32:64"
 
 ; CHECK-LABEL: @super_cycle_1(
+; CHECK:       br
+; CHECK:       phi
+; CHECK:       br
+; CHECK:       br
+; CHECK:       phi
+; CHECK:       br
+; CHECK:       br
+; CHECK:       phi
+; CHECK:       br
 ; CHECK:       add
-; CHECK:       br
-; CHECK:       br
-; CHECK:       br
-; CHECK:       br
-; CHECK:       br
-; CHECK:       br
 ; CHECK:       br
 ; CHECK:       br
 ; CHECK:       br
@@ -40,9 +43,10 @@ define i32 @super_cycle_1(i32, i8**) #0 {
 }
 
 ; CHECK-LABEL: @super_cycle_2(
+; CHECK:       br
+; CHECK:       phi
+; CHECK:       br
 ; CHECK:       add
-; CHECK:       br
-; CHECK:       br
 ; CHECK:       br
 ; CHECK:       br
 ; CHECK:       br
@@ -69,11 +73,11 @@ define i32 @super_cycle_2(i32, i8**) #0 {
 }
 
 ; CHECK-LABEL: @super_cycle_3(
+; CHECK:       br
+; CHECK:       phi
+; CHECK:       br
 ; CHECK:       add
 ; CHECK:       inttoptr
-; CHECK:       br
-; CHECK:       br
-; CHECK-NOT:   add
 ; CHECK:       load
 ; CHECK:       br
 ; CHECK:       br

@@ -1,61 +1,43 @@
 ; RUN: opt < %s -ssapre -S | FileCheck %s
 target datalayout = "e-p:64:64:64-p1:16:16:16-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:32:64-f32:32:32-f64:64:64-v64:64:64-v128:128:128-a0:0:64-n8:16:32:64"
 
-; CHECK-LABEL: complex_1(
-declare zeroext i8 @c_tolower(i8 zeroext) #1
-define i32 @complex_1(i8*, i8*) #0 {
 
-; CHECK:      icmp
-; CHECK-NEXT: br
-  %3 = icmp eq i8* %0, %1
-  br i1 %3, label %4, label %5
+; CHECK-LABEL: @complex_1(
+; CHECK-NOT:   getelementptr
+define void @complex_1(i8** %argv) #0 {
+  br label %1
 
-; CHECK: br
-  br label %25
+; <label>:1:                                      ; preds = %10, %6, %0
+  br i1 undef, label %2, label %11
 
-; CHECK: br
-  br label %6
+; <label>:2:                                      ; preds = %1
+  br i1 undef, label %3, label %7
 
-; CHECK: br
-  %.02 = phi i8* [ %0, %5 ], [ %15, %17 ]
-  %.01 = phi i8* [ %1, %5 ], [ %16, %17 ]
-  %7 = load i8, i8* %.02, align 1
-  %8 = call zeroext i8 @c_tolower(i8 zeroext %7)
-  %9 = load i8, i8* %.01, align 1
-  %10 = call zeroext i8 @c_tolower(i8 zeroext %9)
-  %11 = zext i8 %8 to i32
-  %12 = icmp eq i32 %11, 0
-  br i1 %12, label %13, label %14
+; <label>:3:                                      ; preds = %2
+  br label %4
 
-; CHECK:      zext i8 %10 to i32
-; CHECK-NEXT: br
-  br label %21
+; <label>:4:                                      ; preds = %5, %3
+  br i1 undef, label %5, label %6
 
-; CHECK:      getelementptr inbounds i8, i8* %.02, i32 1
-; CHECK-NEXT: getelementptr inbounds i8, i8* %.01, i32 1
-; CHECK-NEXT: br
-  %15 = getelementptr inbounds i8, i8* %.02, i32 1
-  %16 = getelementptr inbounds i8, i8* %.01, i32 1
-  br label %17
+; <label>:5:                                      ; preds = %4
+  br label %4
 
-; CHECK:      zext i8 %10 to i32
-; CHECK-NEXT: icmp
-; CHECK-NEXT: br
-  %18 = zext i8 %8 to i32
-  %19 = zext i8 %10 to i32
-  %20 = icmp eq i32 %18, %19
-  br i1 %20, label %6, label %21
+; <label>:6:                                      ; preds = %4
+  br label %1
 
-; CHECK:      phi i32 [ %19, %18 ], [ %14, %13 ]
-; CHECK-NEXT: sub nsw i32 %11, %22
-; CHECK-NEXT: br
-  %22 = zext i8 %8 to i32
-  %23 = zext i8 %10 to i32
-  %24 = sub nsw i32 %22, %23
-  br label %25
+; <label>:7:                                      ; preds = %2
+  br label %8
 
-; CHECK:      phi i32 [ 0, %4 ], [ %23, %21 ]
-; CHECK-NEXT: ret
-  %.0 = phi i32 [ 0, %4 ], [ %24, %21 ]
-  ret i32 %.0
+; <label>:8:                                      ; preds = %9, %7
+  br i1 undef, label %9, label %10
+
+; <label>:9:                                      ; preds = %8
+  %arrayidx35 = getelementptr inbounds i8*, i8** %argv, i64 undef
+  br label %8
+
+; <label>:10:                                     ; preds = %8
+  br label %1
+
+; <label>:11:                                     ; preds = %1
+  ret void
 }
