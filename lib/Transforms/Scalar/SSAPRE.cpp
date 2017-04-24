@@ -349,14 +349,13 @@ SetAllOperandsSave(Instruction *I) {
 }
 
 void SSAPRE::
-AddSubstitution(Expression *E, Expression *S) {
+AddSubstitution(Expression *E, Expression *S, bool Direct) {
   assert(E && S);
   assert(ExprToPExpr[E] == ExprToPExpr[S] || IsBottomOrVarOrConst(S) &&
       "Substituting expression must be of the same Proto or Bottom");
 
   auto *PE = ExprToPExpr[E];
-  if (!PE)
-    PE = E;
+  if (!PE) PE = E;
 
   assert(PE);
 
@@ -371,9 +370,9 @@ AddSubstitution(Expression *E, Expression *S) {
     return;
   }
 
-  // Try get the last one
-  if (auto SS = GetSubstitution(S)) {
-    S = SS;
+  if (!Direct) {
+    // Try get the last one
+    if (auto SS = GetSubstitution(S)) S = SS;
   }
 
   // If this is a new Substitution add a Save
@@ -583,20 +582,24 @@ MaterializeFactor(FactorExpression *FE, PHINode *PHI) {
   ValueToExp[PHI] = FE;
 }
 
-void SSAPRE::
-ReplaceFactor(FactorExpression *FE, Expression *VE) {
-  if (FE->getIsMaterialized())
-    ReplaceFactorMaterialized(FE, VE);
-  else
-    ReplaceFactorFinalize(FE, VE);
+bool SSAPRE::
+ReplaceFactor(FactorExpression *FE, Expression *VE, bool Direct) {
+  if (FE->getIsMaterialized()) {
+    ReplaceFactorMaterialized(FE, VE, Direct);
+    return true;
+  }
+
+  ReplaceFactorFinalize(FE, VE, Direct);
+  return false;
 }
 
 void SSAPRE::
-ReplaceFactorMaterialized(FactorExpression * FE, Expression * VE) {
+ReplaceFactorMaterialized(FactorExpression * FE, Expression * VE, bool Direct) {
   assert(FE && VE);
 
   // We want the most recent expression
-  VE = GetSubstitution(VE);
+  if (!Direct)
+    VE = GetSubstitution(VE);
 
   bool IsBot = IsBottom(VE);
 
@@ -621,7 +624,7 @@ ReplaceFactorMaterialized(FactorExpression * FE, Expression * VE) {
 
   // Replace all PHI uses with a real instruction result only
   if (!IsBot) {
-    auto V = GetSubstituteValue(VE);
+    auto V = (Value *)ExpToValue[VE];
     PHI->replaceAllUsesWith(V);
   }
 
@@ -634,15 +637,16 @@ ReplaceFactorMaterialized(FactorExpression * FE, Expression * VE) {
   KillList.push_back(PHI);
 
   // The rest is the same as for non-materialized Factor
-  ReplaceFactorFinalize(FE, VE);
+  ReplaceFactorFinalize(FE, VE, Direct);
 }
 
 void SSAPRE::
-ReplaceFactorFinalize(FactorExpression *FE, Expression *VE) {
+ReplaceFactorFinalize(FactorExpression *FE, Expression *VE, bool Direct) {
   assert(FE && VE);
 
   // We want the most recent expression
-  VE = GetSubstitution(VE);
+  if (!Direct)
+    VE = GetSubstitution(VE);
 
   // Replace all Factor uses. Note that we do not add Save for each Factor use,
   // because Factors do not use their operands before they're materialized, or
@@ -673,7 +677,7 @@ ReplaceFactorFinalize(FactorExpression *FE, Expression *VE) {
   // remove all other expressions of the same version and replace their usage
   // with this new one.
   for (auto V : GetFactorVersions(FE)) {
-    AddSubstitution(V, VE);
+    AddSubstitution(V, VE, Direct);
   }
 
   // If we replace the Factor with a newly created expression we need to assign
@@ -685,7 +689,7 @@ ReplaceFactorFinalize(FactorExpression *FE, Expression *VE) {
 
   // We stiil need this link, because other instructions can reference this
   // Factor, not only its versions.
-  AddSubstitution(FE, VE);
+  AddSubstitution(FE, VE, Direct);
 }
 
 unsigned int SSAPRE::
@@ -1861,8 +1865,6 @@ Rename() {
           F->setVExpr(B, VE);
         }
 
-        assert(VE && "...");
-
         if (IsBottomOrVarOrConst(VE)) continue;
 
         // STEP 3 Init: HasRealUse
@@ -2248,14 +2250,8 @@ FactorGraphWalk() {
         // induction variable(expressions) we cannot move before we move
         // expressions they depend on.
 
-        // If this is a real PHI and it is used directly it must stay. Also
-        // this means that the non-cycled incoming values also play a role and
-        // must not be removed.
-        if (FE->getIsMaterialized() && FactorToPHI[FE]->getNumUses() != 0)
-          continue;
-
         // Cycled Expression
-        Expression * CE = nullptr;
+        SmallVector<Expression *, 8> CEV;
 
         // Non-Cycled incoming Expression
         Expression * VE = nullptr;
@@ -2271,7 +2267,7 @@ FactorGraphWalk() {
 
           if (FE->getIsCycle(V)) {
             CycledHRU |= FE->getHasRealUse(V);
-            CE = V;
+            CEV.push_back(V);
             continue;
           }
 
@@ -2282,18 +2278,39 @@ FactorGraphWalk() {
           VE = V;
         }
 
-        if (ShouldStay) continue;
+        if (ShouldStay ||
+
+            // If this is a real PHI and it is used directly it must stay. Also
+            // this means that the non-cycled incoming values also play a role
+            // and must not be removed.
+            (IsBottomOrVarOrConst(VE) &&
+              FE->getIsMaterialized() &&
+              FactorToPHI[FE]->getNumUses() != 0)) {
+
+          // By this time these cycled expression will point to the Factor, but
+          // since it stays we these expressions must stay as well.
+          //
+          // N.B. This is where profiling would be useful, we can prove whether
+          // operands in these expressions dominate the factored phi and move
+          // them up the cycle, thus precomputing the values, but here we act
+          // conservatively and leave the expressions inside the cycle since
+          // we do not know if we ever enter it
+          for (auto CE : CEV)  AddSubstitution(CE, CE, /* direct */ true);
+          continue; // no further processing
+        }
 
         // Cycled sides is never used
         if (!CycledHRU && !FE->getDownSafe()) {
-          ReplaceFactor(FE, GetBottom());
-          Changed = true;
-          continue;
+          Changed = ReplaceFactor(FE, GetBottom());
+          continue; // no further processing
         }
 
-        // At this point we only concern whether the non-cycled expression
-        // exist or not. Even if it is a variable or a const it is not used due
-        // to the guard at the top of this code block.
+        // Make sure the operands available before the Factor
+        if (!OperandsDominate(PE->getProto(), FE)) continue;
+
+        // At this point we only the only concern is whether the non-cycled
+        // expression exist or not. Even if it is a variable or a const it is
+        // not used due to the guard above
         if (IsBottomOrVarOrConst(VE)) {
           auto I = PE->getProto()->clone();
           VE = CreateExpression(*I);
@@ -2304,9 +2321,8 @@ FactorGraphWalk() {
           I->insertBefore(T);
         }
 
-        ReplaceFactor(FE, VE);
-
-        Changed = true;
+        Changed = ReplaceFactor(FE, VE, /* direct */ true);
+        continue; // no further processing
 
       } else {
         // The Factor must be available and must not be cycled since those are

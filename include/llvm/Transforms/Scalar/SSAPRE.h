@@ -533,6 +533,7 @@ public:
       OS << (Cycles[i] ? "T" : "F");
       if (i + 1 != l) OS << ",";
     }
+    OS << ">";
     OS << ", HRU: <";
     for (unsigned i = 0, l = HasRealUse.size(); i < l; ++i) {
       OS << (HasRealUse[i] ? "T" : "F");
@@ -710,7 +711,7 @@ private:
 
   void SetOrderBefore(Instruction *I, Instruction *B);
   void SetAllOperandsSave(Instruction *I);
-  void AddSubstitution(Expression *E, Expression *S);
+  void AddSubstitution(Expression *E, Expression *S, bool Direct = false);
   void RemSubstitution(Expression *E);
 
   // Go through all the Substitutions of the Expression and return the most
@@ -729,9 +730,15 @@ private:
   void KillFactor(FactorExpression *, bool BottomSubstitute = true);
   void MaterializeFactor(FactorExpression *FE, PHINode *PHI);
 
-  void ReplaceFactor(FactorExpression * FE, Expression * E);
-  void ReplaceFactorMaterialized(FactorExpression * FE, Expression * E);
-  void ReplaceFactorFinalize(FactorExpression * FE, Expression * E);
+  bool ReplaceFactor(FactorExpression * FE,
+                     Expression * E,
+                     bool Direct = false);
+  void ReplaceFactorMaterialized(FactorExpression * FE,
+                                 Expression * E,
+                                 bool Direct = false);
+  void ReplaceFactorFinalize(FactorExpression * FE,
+                             Expression * E,
+                             bool Direct = false);
 
   // This function provides global ranking of operations so that we can place
   // them in a canonical order.  Note that rank alone is not necessarily enough
