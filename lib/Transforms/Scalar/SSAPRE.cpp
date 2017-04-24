@@ -79,9 +79,9 @@ static Expression * GetBottom() { return &BExpr; }
 
 ExpVector_t & SSAPRE::
 GetFactorVersions(const FactorExpression *F) {
-  assert(F && !IsBottom(F));
+  assert(F && !IsBottomOrVarOrConst(F));
   auto PE = F->getPExpr();
-  assert(PE && !IsBottom(PE));
+  assert(PE && !IsBottomOrVarOrConst(PE));
   return PExprToVersions[PE][F->getVersion()];
 }
 
@@ -95,6 +95,12 @@ GetExpVersions(const Expression *E) {
 
 bool SSAPRE::
 IsBottom(const Expression *E) {
+  assert(E);
+  return E == GetBottom();
+}
+
+bool SSAPRE::
+IsBottomOrVarOrConst(const Expression *E) {
   assert(E);
   return E == GetBottom() || IsVariableOrConstant(E);
 }
@@ -345,7 +351,7 @@ SetAllOperandsSave(Instruction *I) {
 void SSAPRE::
 AddSubstitution(Expression *E, Expression *S) {
   assert(E && S);
-  assert(ExprToPExpr[E] == ExprToPExpr[S] || S == GetBottom() &&
+  assert(ExprToPExpr[E] == ExprToPExpr[S] || IsBottomOrVarOrConst(S) &&
       "Substituting expression must be of the same Proto or Bottom");
 
   auto *PE = ExprToPExpr[E];
@@ -406,7 +412,7 @@ GetSubstitution(Expression *E, bool Direct) {
 
   while (auto EE = MA[E]) {
     assert(EE && "Must not be null");
-    if (EE == GetBottom()) return EE;
+    if (IsBottom(EE)) return EE;
     if (E == EE) return E;
     E = EE;
   }
@@ -592,7 +598,7 @@ ReplaceFactorMaterialized(FactorExpression * FE, Expression * VE) {
   // We want the most recent expression
   VE = GetSubstitution(VE);
 
-  bool IsBottom = VE == GetBottom();
+  bool IsBot = IsBottom(VE);
 
   // Add save for every real use of this PHI
   auto PHI = (PHINode *)FactorToPHI[FE];
@@ -602,7 +608,7 @@ ReplaceFactorMaterialized(FactorExpression * FE, Expression * VE) {
     auto UI = (Instruction *)U;
     auto UE  = InstToVExpr[UI];
 
-    if (IsBottom && !IsToBeKilled (UI) && !FactorExpression::classof(UE)) {
+    if (IsBot && !IsToBeKilled (UI) && !FactorExpression::classof(UE)) {
       llvm_unreachable("You cannot replace Factor with Bottom \
                         for a regular non-factored instruction");
     }
@@ -614,7 +620,7 @@ ReplaceFactorMaterialized(FactorExpression * FE, Expression * VE) {
   }
 
   // Replace all PHI uses with a real instruction result only
-  if (!IsBottom) {
+  if (!IsBot) {
     auto V = GetSubstituteValue(VE);
     PHI->replaceAllUsesWith(V);
   }
@@ -656,7 +662,7 @@ ReplaceFactorFinalize(FactorExpression *FE, Expression *VE) {
         if (IsInductionExpression(F, VE)) {
           KillFactor(F);
         } else {
-          F->setIsCycle(true);
+          F->setIsCycle(VE, true);
         }
       }
     }
@@ -830,8 +836,6 @@ CreateBasicExpression(Instruction &I) {
     if (ShouldSwapOperands(E->getOperand(0), E->getOperand(1)))
       E->swapOperands(0, 1);
   }
-
-  return E;
 
   // Perform simplificaiton
   // We do not actually require simpler instructions but rather require them be
@@ -1011,7 +1015,7 @@ CreateExpression(Instruction &I) {
 //===----------------------------------------------------------------------===//
 
 // PHI operands Prototype solver
-// NOTE The Solver works on assumption that there is only two incomming values.
+// NOTE The Solver works on assumption that there is only two incoming values.
 // NOTE I'm sure there is a pass that converts n-phi nodes to 2-phi nodes, or
 // NOTE it should be created anyway.
 namespace llvm {
@@ -1859,7 +1863,7 @@ Rename() {
 
         assert(VE && "...");
 
-        if (IsBottom(VE)) continue;
+        if (IsBottomOrVarOrConst(VE)) continue;
 
         // STEP 3 Init: HasRealUse
         bool HasRealUse = false;
@@ -1923,7 +1927,7 @@ Rename() {
         // for sure whether a constant/variable is involved.
         // FIXME All other expressions' arguments MUST dominate this bottom
         // FIXME quasi-expression
-        if (IsVariableOrConstant(MFVE) && FVE == GetBottom()) {
+        if (IsVariableOrConstant(MFVE) && IsBottom(FVE)) {
           continue;
         }
 
@@ -1984,7 +1988,7 @@ Rename() {
       // This happens if the Factor is contained inside a cycle and there is
       // not change in the expression's operands along this cycle.
       if (F->getVersion() == VE->getVersion()) {
-        F->setIsCycle(true);
+        F->setIsCycle(VE, true);
       }
     }
   }
@@ -2097,13 +2101,12 @@ ResetCanBeAvail(FactorExpression *G) {
   for (auto F : FExprs) {
     if (F->hasVExpr(G) && !F->getHasRealUse(G)) {
 
-      F->replaceVExpr(G, GetBottom());
-
       // If it happens to be a cycle clear the flag
-      if (F->getIsCycle() && F == G) {
-        assert(F->getVExprNum() == 2 && "Well shit...");
-        F->setIsCycle(false);
+      if (F->getIsCycle(G)) {
+        F->setIsCycle(G, false);
       }
+
+      F->replaceVExpr(G, GetBottom());
 
       if (!F->getDownSafe() && F->getCanBeAvail()) {
         ResetCanBeAvail(F);
@@ -2171,7 +2174,7 @@ Finalize() {
 
     for (auto F : BlockToFactors[B]) {
       auto V = F->getVersion();
-      if (F->getWillBeAvail() || F->getIsCycle() || F->getIsMaterialized()) {
+      if (F->getWillBeAvail() || F->getAnyCycles() || F->getIsMaterialized()) {
         auto PE = F->getPExpr();
         AvailDef[PE][V] = F;
       }
@@ -2207,7 +2210,7 @@ Finalize() {
       // If there was no expression occurrence before, or it was an expression's
       // operand definition, or the previous expression does not strictly
       // dominate the current occurrence we update the record
-      if (!DEF || IsBottom(DEF) || !NotStrictlyDominates(DEF, VE)) {
+      if (!DEF || IsBottomOrVarOrConst(DEF) || !NotStrictlyDominates(DEF, VE)) {
         ADPE[V] = VE;
 
         // Otherwise, it is the same expression of the same version, and we just
@@ -2230,37 +2233,68 @@ FactorGraphWalk() {
     for (auto FE : List) {
       auto PE = (Expression *)FE->getPExpr();
 
-      if (FE->getIsCycle()) {
-        if (FE->getVExprNum() != 2)
-          llvm_unreachable("well, shit..");
+      if (FE->getAnyCycles()) {
+        // There are two ways to deal with cycled factors, it all depends on
+        // single non-cycled predecessor availability, if there is one we can
+        // delete factor and replace all uses with it, otherwise the factor
+        // stays or will be materialized later
+
+        // N.B.
+        // Cycled incoming values always match version with the Factor.
+        // Technically cycles can exist even with versions that match not
+        // Factor's but those are irrelevant to what we trying to achieve. Our
+        // goal is to move non-changing expressions out of the cycle, the ones
+        // that change inside cycle and therefore depend potentially on
+        // induction variable(expressions) we cannot move before we move
+        // expressions they depend on.
+
+        // If this is a real PHI and it is used directly it must stay. Also
+        // this means that the non-cycled incoming values also play a role and
+        // must not be removed.
+        if (FE->getIsMaterialized() && FactorToPHI[FE]->getNumUses() != 0)
+          continue;
 
         // Cycled Expression
         Expression * CE = nullptr;
-        // Non-Cycled incomming Expression
+
+        // Non-Cycled incoming Expression
         Expression * VE = nullptr;
-        // The source of the incomming Expression
+
+        // Non-Cycled incoming blocks
         BasicBlock * PB = nullptr;
+
+        bool ShouldStay = false;
+        bool CycledHRU = false;
+
         for (auto P : FE->getPreds()) {
           auto V = FE->getVExpr(P);
-          if (V->getVersion() == FE->getVersion()) {
+
+          if (FE->getIsCycle(V)) {
+            CycledHRU |= FE->getHasRealUse(V);
             CE = V;
-          } else {
-            PB = P;
-            VE = V;
+            continue;
           }
+
+          // Multiple non-cycled predecessors force this Factor to stay
+          if (VE) ShouldStay = true;
+
+          PB = P;
+          VE = V;
         }
 
-        // Cycled side is never used
-        if (!FE->getHasRealUse(CE) && !FE->getDownSafe()) {
+        if (ShouldStay) continue;
+
+        // Cycled sides is never used
+        if (!CycledHRU && !FE->getDownSafe()) {
           ReplaceFactor(FE, GetBottom());
           Changed = true;
           continue;
         }
 
-        // Regardless of whether the Factor is materialized its non-cycled
-        // expression may be a constant which we regard as bottom value. In any
-        // case if the incomming value is bottom we need to create one.
-        if (IsBottom(VE)) {
+        // At this point we only concern whether the non-cycled expression
+        // exist or not. Even if it is a variable or a const it is not used due
+        // to the guard at the top of this code block.
+        if (IsBottomOrVarOrConst(VE)) {
           auto I = PE->getProto()->clone();
           VE = CreateExpression(*I);
           AddExpression(PE, VE, I, PB);
@@ -2278,7 +2312,7 @@ FactorGraphWalk() {
         // The Factor must be available and must not be cycled since those are
         // processed differently, and must not be materialized because those
         // already have their operands set
-        if (FE->getWillBeAvail() && !FE->getIsCycle() && !FE->getIsMaterialized()) {
+        if (FE->getWillBeAvail() && !FE->getAnyCycles() && !FE->getIsMaterialized()) {
           auto PE = (Expression *)FE->getPExpr();
           for (auto BB : FE->getPreds()) {
             auto O = FE->getVExpr(BB);
@@ -2326,7 +2360,7 @@ FactorGraphWalk() {
 
       // Kill non-materializd factors
       if (!FE->getWillBeAvail() && !FE->getIsMaterialized()) {
-        ReplaceFactor(FE, GetBottom());
+        KillFactor(FE, false);
         continue;
       }
 
@@ -2384,7 +2418,7 @@ PHIInsertion() {
 
       // If all the ops are the same just use it
       if (Same) {
-        if (O == GetBottom()) {
+        if (IsBottom(O)) {
           assert(PHIPatches.count(F) == 0 && "Uh oh");
           continue;
         }
@@ -2412,7 +2446,7 @@ PHIInsertion() {
       for (auto P : F->getPreds()) {
         auto VE = F->getVExpr(P);
         auto SE = GetSubstitution(VE);
-        if (SE == GetBottom()) {
+        if (IsBottom(SE)) {
           Killed = true;
           break;
         }
@@ -2499,14 +2533,14 @@ ApplySubstitutions() {
       continue;
     }
 
-    if (VE == GetBottom()) continue;
+    if (IsBottom(VE)) continue;
     if (IgnoreExpression(VE)) continue;
     if (IsToBeKilled(VE)) continue;
 
     auto VI = VExprToInst[VE];
     auto SE = GetSubstitution(VE);
 
-    if (SE == GetBottom() || VE == SE) {
+    if (IsBottom(SE) || VE == SE) {
       // Standard case, instruction is not used at all and is not replaced by
       // anything. The only way for instruction to be substituted with a bottom
       // is when its Factor is deleted because of uselessness
@@ -2702,7 +2736,7 @@ PrintDebug(const std::string &Caption) {
       auto SI = VExprToInst[SE];
 
       if (!VE) continue;
-      if (VE == GetBottom()) continue;
+      if (IsBottom(VE)) continue;
       if (IgnoreExpression(VE)) continue;
       if (VI && !VI->getParent()) continue;
 
@@ -2730,8 +2764,10 @@ PrintDebug(const std::string &Caption) {
       dbgs() << " -> ";
       if (VE == SE) {
         dbgs() << "-";
-      } else if (SE == GetBottom()) {
+      } else if (IsBottom(SE)) {
         dbgs() << "⊥";
+      } else if (IsVariableOrConstant(SE)) {
+        ExpToValue[SE]->print(dbgs());
       } else if (auto FE = dyn_cast<FactorExpression>(SE)) {
         if (FE->getIsMaterialized() && FactorToPHI[FE]->getParent()) {
           dbgs() << "(F) ";

@@ -400,7 +400,7 @@ private:
   // The second course of actions would be to push the computation directly to
   // the first use place, but we need to prove that this place is not inside a
   // cycle, or at least in the same cycle as init.
-  bool Cycle;
+  SmallVector<bool, 8> Cycles;
 
   // If True expression is Anticipated on every path leading from this Factor
   bool DownSafe;
@@ -415,7 +415,7 @@ private:
 public:
   FactorExpression(const BasicBlock &BB)
       : Expression(ET_Factor), BB(BB),
-                   Materialized(false), Cycle(false), DownSafe(true),
+                   Materialized(false), DownSafe(true),
                    CanBeAvail(true), Later(true) { }
   FactorExpression() = delete;
   FactorExpression(const FactorExpression &) = delete;
@@ -427,8 +427,20 @@ public:
   void setIsMaterialized(bool L) { Materialized = L; }
   bool getIsMaterialized() const { return Materialized; }
 
-  void setIsCycle(bool C) { Cycle = C; }
-  bool getIsCycle() const { return Cycle; }
+  bool getAnyCycles() const {
+    for (auto C : Cycles) {
+      if (C) return true;
+    }
+    return false;
+  }
+  bool getIsCycle(Expression *E) const {
+    assert(E && hasVExpr(E));
+    return Cycles[getVExprIndex(E)];
+  }
+  void setIsCycle(Expression *E, bool CYC) {
+    assert(E && hasVExpr(E));
+    Cycles[getVExprIndex(E)] = CYC;
+  }
 
   void setPExpr(const Expression *E) { PE = E; }
   const Expression* getPExpr() const { return PE; }
@@ -442,6 +454,7 @@ public:
     Indices[I] = B;
     Blocks.insert(B);
     Versions.push_back(nullptr);
+    Cycles.push_back(false);
     HasRealUse.push_back(false);
   }
 
@@ -482,11 +495,6 @@ public:
 
   bool getWillBeAvail() const { return CanBeAvail && !Later; }
 
-  // This is only True when this Factor is Materialized and is DownSafe. It is
-  // possible to gave False WBA at the same time. The meaning of this is that
-  // the Factor is already materialized into a PHI and this PHI is used.  bool
-  // getIsAvail() const { return CanBeAvail && Materialized; }
-
   bool getHasRealUse(Expression *E) const {
     assert(E && hasVExpr(E));
     return HasRealUse[getVExprIndex(E)];
@@ -516,7 +524,21 @@ public:
     BB.printAsOperand(OS, false);
     OS << ", PE: " << (void *)PE;
     OS << ", MAT: " << Materialized;
-    OS << ", CYC: " << Cycle;
+    OS << ", DS: " << (DownSafe ? "T" : "F");
+    OS << ", CBA: " << (CanBeAvail ? "T" : "F");
+    OS << ", L: " << (Later ? "T" : "F");
+    OS << ", WBA: " << (getWillBeAvail() ? "T" : "F");
+    OS << ", CYC: <";
+    for (unsigned i = 0, l = Cycles.size(); i < l; ++i) {
+      OS << (Cycles[i] ? "T" : "F");
+      if (i + 1 != l) OS << ",";
+    }
+    OS << ", HRU: <";
+    for (unsigned i = 0, l = HasRealUse.size(); i < l; ++i) {
+      OS << (HasRealUse[i] ? "T" : "F");
+      if (i + 1 != l) OS << ",";
+    }
+    OS << ">";
     OS << ", V: {";
     for (unsigned i = 0, l = Versions.size(); i < l; ++i) {
       auto B = Indices.lookup(i);
@@ -534,17 +556,6 @@ public:
       if (i + 1 != l) OS << ",";
     }
     OS << "}";
-    OS << ", DS: " << (DownSafe ? "T" : "F");
-    OS << ", HRU: <";
-    for (unsigned i = 0, l = HasRealUse.size(); i < l; ++i) {
-      OS << (HasRealUse[i] ? "T" : "F");
-      if (i + 1 != l) OS << ",";
-    }
-    OS << ">";
-    OS << ", CBA: " << (CanBeAvail ? "T" : "F");
-    OS << ", L: " << (Later ? "T" : "F");
-    OS << ", WBA: " << (getWillBeAvail() ? "T" : "F");
-    // OS << ", AV: " << (getIsAvail() ? "T" : "F");
   }
 }; // class FactorExpression
 
@@ -654,6 +665,7 @@ private:
   // Check whether an Expression is a ⊥ value. It can be not only a real bottom
   // value but a constant or a variable since they do not provide a computation
   bool IsBottom(const Expression *E);
+  bool IsBottomOrVarOrConst(const Expression *E);
 
   bool IsVariableOrConstant(const Expression *E);
   bool IsFactoredPHI(Instruction *I);

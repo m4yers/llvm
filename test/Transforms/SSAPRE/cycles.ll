@@ -360,3 +360,43 @@ define i64 @cycle_5_no_ds(i64, i8**) #0 {
 
   ret i64 0
 }
+
+; CHECK-LABEL: @cycle_6(
+; CHECK-NOT:   getelementptr
+define void @cycle_6(i8** %argv) #0 {
+  br label %1
+
+; <label>:1:                                      ; preds = %10, %6, %0
+  br i1 undef, label %2, label %11
+
+; <label>:2:                                      ; preds = %1
+  br i1 undef, label %3, label %7
+
+; <label>:3:                                      ; preds = %2
+  br label %4
+
+; <label>:4:                                      ; preds = %5, %3
+  br i1 undef, label %5, label %6
+
+; <label>:5:                                      ; preds = %4
+  br label %4
+
+; <label>:6:                                      ; preds = %4
+  br label %1
+
+; <label>:7:                                      ; preds = %2
+  br label %8
+
+; <label>:8:                                      ; preds = %9, %7
+  br i1 undef, label %9, label %10
+
+; <label>:9:                                      ; preds = %8
+  %arrayidx35 = getelementptr inbounds i8*, i8** %argv, i64 undef
+  br label %8
+
+; <label>:10:                                     ; preds = %8
+  br label %1
+
+; <label>:11:                                     ; preds = %1
+  ret void
+}

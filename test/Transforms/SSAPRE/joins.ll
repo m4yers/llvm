@@ -189,3 +189,41 @@ define i64 @join_6(i64, i8**) #0 {
   %8 = add nsw i64 %0, 1
   ret i64 0
 }
+
+; Nothing must change
+;
+; CHECK-LABEL: @join_7(
+; CHECK:       icmp
+; CHECK:       br
+; CHECK:       icmp
+; CHECK:       br
+; CHECK:       icmp
+; CHECK:       br
+; CHECK:       icmp
+; CHECK:       br
+; CHECK:       phi
+; CHECK:       xor
+; CHECK:       phi
+; CHECK:       zext
+; CHECK:       ret
+define i32 @join_7(i32) #0 {
+  %2 = icmp sge i32 %0, 33
+  br i1 %2, label %3, label %12
+
+  %4 = icmp sle i32 %0, 126
+  br i1 %4, label %5, label %12
+
+  %6 = icmp sge i32 %0, 48
+  br i1 %6, label %7, label %9
+
+  %8 = icmp sle i32 %0, 57
+  br label %9
+
+  %10 = phi i1 [ false, %5 ], [ %8, %7 ]
+  %11 = xor i1 %10, true
+  br label %12
+
+  %13 = phi i1 [ false, %3 ], [ false, %1 ], [ %11, %9 ]
+  %14 = zext i1 %13 to i32
+  ret i32 %14
+}
