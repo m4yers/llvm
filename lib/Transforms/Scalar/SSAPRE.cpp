@@ -2681,13 +2681,10 @@ CodeMotion() {
 }
 
 void SSAPRE::
-PrintDebug(const std::string &Caption) {
-  dbgs() << "\n\n---------------------------------------------";
-  dbgs() << Caption << "\n";
+PrintDebugInstructions() {
 
-  dbgs() << "\nProgram";
-  dbgs() << "\n(dfs) (instruction)";
-  dbgs() << "\n---------------------------";
+  dbgs() << "\n-Program----------------------------------\n";
+
   for (auto &B : *RPOT) {
     for (auto &I : *B) {
       dbgs() << "\n" << InstrDFS[&I];
@@ -2695,12 +2692,18 @@ PrintDebug(const std::string &Caption) {
     }
   }
 
-  dbgs() << "\n\nExpressions";
-  dbgs() << "\n(l/d) (dfs) (expression)";
-  dbgs() << "\n---------------------------\n";
+  dbgs() << "\n-----------------------------------------\n";
+}
+
+void SSAPRE::
+PrintDebugExpressions(bool PrintIgnored) {
+
+  dbgs() << "\n-Expressions-----------------------------\n";
+
   for (auto &P : PExprToInsts) {
     auto &PE = P.getFirst();
     if (IgnoreExpression(PE)) continue;
+    dbgs() << "\n";
     dbgs() << ExpressionTypeToString(PE->getExpressionType());
     dbgs() << " " << (void *)PE;
     for (auto VE : PExprToVExprs[PE]) {
@@ -2710,41 +2713,54 @@ PrintDebug(const std::string &Caption) {
       dbgs() << " (" << InstrDFS[I]<< ") ";
       VE->printInternal(dbgs());
     }
-    dbgs() << "\n";
-  }
-  dbgs() << "--------\n";
-  for (auto &P : PExprToInsts) {
-    auto &PE = P.getFirst();
-    if (!IgnoreExpression(PE)) continue;
-    dbgs() << ExpressionTypeToString(PE->getExpressionType());
-    dbgs() << " " << (void *)PE;
-    for (auto VE : PExprToVExprs[PE]) {
-      auto I = VExprToInst[VE];
-      dbgs() << "\n\t\t\t\t\t\t\t\t";
-      dbgs() << (I->getParent() ? "(l)" : "(d)");
-      dbgs() << " (" << InstrDFS[I]<< ") ";
-      VE->dump();
-    }
-    dbgs() << "\n";
   }
 
-  dbgs() << "\nBlockToFactors";
-  dbgs() << "\n---------------------------\n";
+  if (PrintIgnored) {
+    dbgs() << "--------\n";
+    for (auto &P : PExprToInsts) {
+      auto &PE = P.getFirst();
+      if (!IgnoreExpression(PE)) continue;
+      dbgs() << "\n";
+      dbgs() << ExpressionTypeToString(PE->getExpressionType());
+      dbgs() << " " << (void *)PE;
+      for (auto VE : PExprToVExprs[PE]) {
+        auto I = VExprToInst[VE];
+        dbgs() << "\n\t\t\t\t\t\t\t\t";
+        dbgs() << (I->getParent() ? "(l)" : "(d)");
+        dbgs() << " (" << InstrDFS[I]<< ") ";
+        VE->dump();
+      }
+    }
+  }
+
+  dbgs() << "\n-----------------------------------------\n";
+}
+
+void SSAPRE::
+PrintDebugFactors() {
+
+  dbgs() << "\n-BlockToFactors--------------------------\n";
+
   for (auto &B : *RPOT) {
     auto BTF = BlockToFactors[B];
     if (!BTF.size()) continue;
-    dbgs() << "(" << BTF.size() << ") ";
+    dbgs() << "\n(" << BTF.size() << ") ";
     B->printAsOperand(dbgs(), false);
     dbgs() << ":";
     for (const auto &F : BTF) {
       dbgs() << "\n";
       F->printInternal(dbgs());
     }
-    dbgs() << "\n";
   }
 
-  dbgs() << "\nSubstitutions";
-  dbgs() << "\n---------------------------\n";
+  dbgs() << "\n-----------------------------------------\n";
+}
+
+void SSAPRE::
+PrintDebugSubstitutions() {
+
+  dbgs() << "\n-Substitutions---------------------------\n";
+
   bool UseSeparator = true;
   bool PrintHeader = true;
   for (auto &PP : Substitutions) {
@@ -2765,9 +2781,11 @@ PrintDebug(const std::string &Caption) {
       if (VI && !VI->getParent()) continue;
 
       if (PrintHeader) {
-        dbgs() << "PE: " << (void *)PE << "\n";
+        dbgs() << "\nPE: " << (void *)PE;
         PrintHeader = false;
       }
+
+      dbgs() << "\n";
 
       if (auto FE = dyn_cast<FactorExpression>(VE)) {
         if (FE->getIsMaterialized() && FactorToPHI[FE]->getParent()) {
@@ -2806,7 +2824,6 @@ PrintDebug(const std::string &Caption) {
       } else {
         SI->print(dbgs());
       }
-      dbgs() << "\n";
     }
 
     if (UseSeparator && !PrintHeader) {
@@ -2815,8 +2832,14 @@ PrintDebug(const std::string &Caption) {
     }
   }
 
-  dbgs() << "\nKillList";
-  dbgs() << "\n---------------------------\n";
+  dbgs() << "\n-----------------------------------------\n";
+}
+
+void SSAPRE::
+PrintDebugKillist() {
+
+  dbgs() << "\n-KillList--------------------------------\n";
+
   for (auto &K : KillList) {
     if (K->getParent()) {
       K->print(dbgs());
@@ -2826,7 +2849,20 @@ PrintDebug(const std::string &Caption) {
     dbgs() << "\n";
   }
 
-  dbgs() << "\n---------------------------------------------\n";
+  dbgs() << "\n-----------------------------------------\n";
+}
+
+
+void SSAPRE::
+PrintDebug(const std::string &Caption) {
+  dbgs() << "\n" << Caption;
+  dbgs() << "\n------------------------------------------------------------\n";
+  PrintDebugInstructions();
+  PrintDebugExpressions();
+  PrintDebugFactors();
+  PrintDebugSubstitutions();
+  PrintDebugKillist();
+  dbgs() << "\n------------------------------------------------------------\n";
 }
 
 PreservedAnalyses SSAPRE::

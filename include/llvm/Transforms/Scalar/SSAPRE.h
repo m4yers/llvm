@@ -801,6 +801,11 @@ private:
   bool KillEmAll();
   bool CodeMotion();
 
+  void PrintDebugInstructions();
+  void PrintDebugExpressions(bool PrintIgnored = false);
+  void PrintDebugFactors();
+  void PrintDebugSubstitutions();
+  void PrintDebugKillist();
   void PrintDebug(const std::string &Caption);
 
   PreservedAnalyses
