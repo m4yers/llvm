@@ -583,18 +583,19 @@ MaterializeFactor(FactorExpression *FE, PHINode *PHI) {
 }
 
 bool SSAPRE::
-ReplaceFactor(FactorExpression *FE, Expression *VE, bool Direct) {
+ReplaceFactor(FactorExpression *FE, Expression *VE, bool HRU, bool Direct) {
   if (FE->getIsMaterialized()) {
-    ReplaceFactorMaterialized(FE, VE, Direct);
+    ReplaceFactorMaterialized(FE, VE, HRU, Direct);
     return true;
   }
 
-  ReplaceFactorFinalize(FE, VE, Direct);
+  ReplaceFactorFinalize(FE, VE, HRU, Direct);
   return false;
 }
 
 void SSAPRE::
-ReplaceFactorMaterialized(FactorExpression * FE, Expression * VE, bool Direct) {
+ReplaceFactorMaterialized(FactorExpression * FE, Expression * VE,
+                          bool HRU, bool Direct) {
   assert(FE && VE);
 
   // We want the most recent expression
@@ -641,7 +642,8 @@ ReplaceFactorMaterialized(FactorExpression * FE, Expression * VE, bool Direct) {
 }
 
 void SSAPRE::
-ReplaceFactorFinalize(FactorExpression *FE, Expression *VE, bool Direct) {
+ReplaceFactorFinalize(FactorExpression *FE, Expression *VE,
+                      bool HRU, bool Direct) {
   assert(FE && VE);
 
   // We want the most recent expression
@@ -658,9 +660,11 @@ ReplaceFactorFinalize(FactorExpression *FE, Expression *VE, bool Direct) {
       if (F->getVExpr(BB) != FE) continue;
 
       F->setVExpr(BB, VE);
+      F->setHasRealUse(VE, HRU);
 
       // If we assign the same version we create a cycle
       if (F->getVersion() == VE->getVersion()) {
+
         // Assigning this VE as operand makes it induction expression, yikes.
         // In this case just kill this F right away
         if (IsInductionExpression(F, VE)) {
@@ -2301,7 +2305,7 @@ FactorGraphWalk() {
 
         // Cycled sides is never used
         if (!CycledHRU && !FE->getDownSafe()) {
-          Changed = ReplaceFactor(FE, GetBottom());
+          Changed = ReplaceFactor(FE, GetBottom(), /* HRU */ false);
           continue; // no further processing
         }
 
@@ -2311,6 +2315,7 @@ FactorGraphWalk() {
         // At this point we only the only concern is whether the non-cycled
         // expression exist or not. Even if it is a variable or a const it is
         // not used due to the guard above
+        bool HRU = FE->getHasRealUse(VE);
         if (IsBottomOrVarOrConst(VE)) {
           auto I = PE->getProto()->clone();
           VE = CreateExpression(*I);
@@ -2319,9 +2324,10 @@ FactorGraphWalk() {
           SetOrderBefore(I, T);
           SetAllOperandsSave(I);
           I->insertBefore(T);
+          HRU = false;
         }
 
-        Changed = ReplaceFactor(FE, VE, /* direct */ true);
+        Changed = ReplaceFactor(FE, VE, HRU, /* direct */ true);
         continue; // no further processing
 
       } else {
@@ -2359,8 +2365,8 @@ FactorGraphWalk() {
         } else if (FE->getIsMaterialized() && FE->getLater() &&
             // Make sure this new instruction's operands will dominate this PHI
             OperandsDominate(PE->getProto(), FE)) {
-          auto I = PE->getProto()->clone();
 
+          auto I = PE->getProto()->clone();
           auto VE = CreateExpression(*I);
           AddExpression(PE, VE, I, B);
           auto T = B->getFirstNonPHI();
@@ -2368,8 +2374,7 @@ FactorGraphWalk() {
           SetAllOperandsSave(I);
           I->insertBefore((Instruction *)T);
 
-          ReplaceFactor(FE, VE);
-
+          ReplaceFactor(FE, VE, /* HRU */ false);
           Changed = true;
         }
       }
@@ -2382,7 +2387,9 @@ FactorGraphWalk() {
 
       Expression * O = nullptr;
       bool Same = true;
+      bool HRU = false;
       for (auto P : FE->getVExprs()) {
+        HRU |= FE->getHasRealUse(P);
         auto PS = GetSubstitution(P);
         if (O && O != PS) {
           Same = false;
@@ -2392,9 +2399,7 @@ FactorGraphWalk() {
       }
 
       // If all the ops are the same just use it
-      if (Same) {
-        ReplaceFactor(FE, O);
-      }
+      if (Same) ReplaceFactor(FE, O, HRU);
     }
   }
 
@@ -2423,7 +2428,9 @@ PHIInsertion() {
       // it, it is possible that the operands are all the same.
       Expression * O = nullptr;
       bool Same = true;
+      bool HRU = false;
       for (auto P : F->getVExprs()) {
+        HRU |= F->getHasRealUse(P);
         auto PS = GetSubstitution(P);
         if (O && O != PS) {
           Same = false;
@@ -2439,7 +2446,7 @@ PHIInsertion() {
           continue;
         }
 
-        ReplaceFactor(F, O);
+        ReplaceFactor(F, O, HRU);
 
         // If there is a patch point awaiting this PHI
         auto OI = (Value *)ExpToValue[O];
@@ -2473,7 +2480,7 @@ PHIInsertion() {
 
       if (Killed) {
         assert(PHIPatches.count(F) == 0 && "Uh oh");
-        ReplaceFactor(F, GetBottom());
+        ReplaceFactor(F, GetBottom(), /* HRU */ false);
         continue;
       }
 

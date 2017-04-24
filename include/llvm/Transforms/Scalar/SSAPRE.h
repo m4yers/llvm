@@ -732,12 +732,15 @@ private:
 
   bool ReplaceFactor(FactorExpression * FE,
                      Expression * E,
+                     bool HRU,
                      bool Direct = false);
   void ReplaceFactorMaterialized(FactorExpression * FE,
                                  Expression * E,
+                                 bool HRU,
                                  bool Direct = false);
   void ReplaceFactorFinalize(FactorExpression * FE,
                              Expression * E,
+                             bool HRU,
                              bool Direct = false);
 
   // This function provides global ranking of operations so that we can place
