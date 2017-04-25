@@ -380,7 +380,7 @@ AddSubstitution(Expression *E, Expression *S, bool Direct) {
       // Any F -> E substitution serves as a jump record
       !FactorExpression::classof(E) &&
       // Saves are useless for F
-      !FactorExpression::classof(S) &&
+      // !FactorExpression::classof(S) &&
       // Only if this is the first time we add this substitution
       MA[E] != S) {
     S->addSave();
@@ -2532,81 +2532,81 @@ bool SSAPRE::
 ApplySubstitutions() {
   bool Changed = false;
 
-  // bottom-up walk
-  for (auto BS = JoinBlocks.rbegin(), BE = JoinBlocks.rend(); BS != BE; ++BS) {
-    auto B = (BasicBlock *)*BS;
-    for (auto &I : *B) {
-      auto VE = InstToVExpr[&I];
+  for (auto P : VExprToInst) {
+    if (!P.getFirst() || !P.getSecond()) {
+      // llvm_unreachable("Why is this happening?");
+      continue;
+    }
+    auto VE = (Expression *)P.getFirst();
 
-      // This is a simplification result replacing the real instruction
-      if (IsVariableOrConstant(VE)) {
-        Value * T = nullptr;
-        if (auto C = dyn_cast<ConstantExpression>(VE)) {
-          T = &C->getConstant();
-        } else if (auto V = dyn_cast<VariableExpression>(VE)) {
-          T = &V->getValue();
-        } else {
-          llvm_unreachable("...");
-        }
-
-        auto VI = VExprToInst[VE];
-        VI->replaceAllUsesWith(T);
-        KillList.push_back(VI);
-        continue;
+    // This is a simplification result replacing the real instruction
+    if (IsVariableOrConstant(VE)) {
+      Value * T = nullptr;
+      if (auto C = dyn_cast<ConstantExpression>(VE)) {
+        T = &C->getConstant();
+      } else if (auto V = dyn_cast<VariableExpression>(VE)) {
+        T = &V->getValue();
+      } else {
+        llvm_unreachable("...");
       }
-
-      if (IsBottom(VE)) continue;
-      if (IgnoreExpression(VE)) continue;
-      if (IsToBeKilled(VE)) continue;
 
       auto VI = VExprToInst[VE];
-      auto SE = GetSubstitution(VE);
-
-      if (IsBottom(SE) || VE == SE) {
-        // Standard case, instruction is not used at all and is not replaced by
-        // anything. The only way for instruction to be substituted with a bottom
-        // is when its Factor is deleted because of uselessness
-        if (!FactorExpression::classof(VE) && !VE->getSave()) {
-          assert(AllUsersKilled(VI));
-          KillList.push_back(VI);
-        }
-        continue;
-      }
-
-      assert(!IsToBeKilled(SE));
-
-      auto SI = (Instruction*)GetSubstituteValue(SE);
-      assert(VI != SI && "Something went wrong");
-
-      // Clear Save count of the original instruction
-      VE->clrSave();
-
-      // Check if this instruction is used at all.
-      int RealUses = 0;
-      for (auto U : VI->users()) {
-        auto UI = (Instruction *)U;
-        if (UI->getParent()) {
-          RealUses++;
-        }
-      }
-
-      // If this instruction does not have real use we subtract one Save from its
-      // DIRECT sub
-      if (RealUses == 0) {
-        auto DS = GetSubstitution(VE, true);
-        DS->remSave();
-        if (!DS->getSave() && !IsToBeKilled(DS)) {
-          KillList.push_back(VExprToInst[DS]);
-        }
-      }
-
-      SE->addSave(RealUses);
-      VI->replaceAllUsesWith(SI);
-
+      VI->replaceAllUsesWith(T);
       KillList.push_back(VI);
-
-      Changed = true;
+      continue;
     }
+
+    if (IsBottom(VE)) continue;
+    if (IgnoreExpression(VE)) continue;
+    if (IsToBeKilled(VE)) continue;
+
+    auto VI = VExprToInst[VE];
+    auto SE = GetSubstitution(VE);
+
+    if (IsBottom(SE) || VE == SE) {
+      // Standard case, instruction is not used at all and is not replaced by
+      // anything. The only way for instruction to be substituted with a bottom
+      // is when its Factor is deleted because of uselessness
+      if (!FactorExpression::classof(VE) && !VE->getSave()) {
+        assert(AllUsersKilled(VI));
+        KillList.push_back(VI);
+      }
+      continue;
+    }
+
+    assert(!IsToBeKilled(SE));
+
+    auto SI = (Instruction*)GetSubstituteValue(SE);
+    assert(VI != SI && "Something went wrong");
+
+    // Clear Save count of the original instruction
+    VE->clrSave();
+
+    // Check if this instruction is used at all.
+    int RealUses = 0;
+    for (auto U : VI->users()) {
+      auto UI = (Instruction *)U;
+      if (UI->getParent()) {
+        RealUses++;
+      }
+    }
+
+    // If this instruction does not have real use we subtract one Save from its
+    // DIRECT sub
+    if (RealUses == 0) {
+      auto DS = GetSubstitution(VE, true);
+      DS->remSave();
+      if (!DS->getSave() && !IsToBeKilled(DS)) {
+        KillList.push_back(VExprToInst[DS]);
+      }
+    }
+
+    SE->addSave(RealUses);
+    VI->replaceAllUsesWith(SI);
+
+    KillList.push_back(VI);
+
+    Changed = true;
   }
 
   return Changed;
