@@ -383,6 +383,9 @@ private:
   DenseMap<BasicBlock *, size_t> Pred;
   DenseMap<size_t, BasicBlock *> Indices;
 
+  DenseMap<BasicBlock *, size_t> PredMult;
+  size_t TotalPredecessors;
+
   // The Versioned Expressions that this Factor joins
   SmallVector<Expression *, 8> Versions;
 
@@ -414,9 +417,9 @@ private:
 
 public:
   FactorExpression(const BasicBlock &BB)
-      : Expression(ET_Factor), BB(BB),
+      : Expression(ET_Factor), BB(BB), TotalPredecessors(0),
                    Materialized(false), DownSafe(true),
-                   CanBeAvail(true), Later(true) { }
+                   CanBeAvail(true), Later(true) {}
   FactorExpression() = delete;
   FactorExpression(const FactorExpression &) = delete;
   FactorExpression &operator=(const FactorExpression &) = delete;
@@ -448,14 +451,25 @@ public:
   void addPred(BasicBlock *B, size_t I) {
     // Even if there are multiple edges from the same predecessor we store only
     // once
-    if (Pred.count(B)) return;
+    TotalPredecessors++;
+
+    if (Pred.count(B)) {
+      PredMult[B]++;
+      return;
+    }
 
     Pred[B] = I;
+    PredMult[B] = 1;
     Indices[I] = B;
     Blocks.insert(B);
     Versions.push_back(nullptr);
     Cycles.push_back(false);
     HasRealUse.push_back(false);
+  }
+
+  size_t GetPredMult(BasicBlock * B) {
+    assert(B);
+    return PredMult[B];
   }
 
   const SmallPtrSet<BasicBlock *, 4> &getPreds() { return Blocks; }
@@ -472,6 +486,7 @@ public:
   Expression * getVExpr(BasicBlock *B) const { return Versions[Pred.lookup(B)]; }
 
   size_t getVExprNum() const { return Versions.size(); }
+  size_t getTotalPredecessors() const { return TotalPredecessors; }
   size_t getVExprIndex(const Expression *V) const  {
     assert(V);
     for(size_t i = 0, l = Versions.size(); i < l; ++i) {

@@ -2487,10 +2487,8 @@ PHIInsertion() {
 
       IRBuilder<> Builder((Instruction *)B->getFirstNonPHI());
       auto TY = F->getPExpr()->getProto()->getType();
-      auto PHI = Builder.CreatePHI(TY, F->getVExprNum());
+      auto PHI = Builder.CreatePHI(TY, F->getTotalPredecessors());
       PHI->setName("ssapre_phi");
-
-      assert(F->getVExprNum() > 1);
 
       // Fill-in PHI operands
       for (auto P : F->getPreds()) {
@@ -2499,12 +2497,13 @@ PHIInsertion() {
         // If the operand is still non-materialized Factor we create a patch
         // point
         auto FVE = dyn_cast<FactorExpression>(VE);
+        auto REP = F->GetPredMult(P);
         if (FVE && !FVE->getIsMaterialized()) {
           if (!PHIPatches.count(FVE)) PHIPatches.insert({FVE, {}});
-          PHIPatches[FVE].push_back({PHI, P});
+          while (REP--) PHIPatches[FVE].push_back({PHI, P});
         } else {
           auto I = VExprToInst[VE];
-          PHI->addIncoming(I, P);
+          while (REP--) PHI->addIncoming(I, P);
         }
 
         // Add Save for each operand, since this Factor is live now
@@ -2682,7 +2681,6 @@ CodeMotion() {
 
 void SSAPRE::
 PrintDebugInstructions() {
-
   dbgs() << "\n-Program----------------------------------\n";
 
   for (auto &B : *RPOT) {
@@ -2697,7 +2695,6 @@ PrintDebugInstructions() {
 
 void SSAPRE::
 PrintDebugExpressions(bool PrintIgnored) {
-
   dbgs() << "\n-Expressions-----------------------------\n";
 
   for (auto &P : PExprToInsts) {
@@ -2738,7 +2735,6 @@ PrintDebugExpressions(bool PrintIgnored) {
 
 void SSAPRE::
 PrintDebugFactors() {
-
   dbgs() << "\n-BlockToFactors--------------------------\n";
 
   for (auto &B : *RPOT) {
@@ -2758,7 +2754,6 @@ PrintDebugFactors() {
 
 void SSAPRE::
 PrintDebugSubstitutions() {
-
   dbgs() << "\n-Substitutions---------------------------\n";
 
   bool UseSeparator = true;
@@ -2837,16 +2832,15 @@ PrintDebugSubstitutions() {
 
 void SSAPRE::
 PrintDebugKillist() {
-
   dbgs() << "\n-KillList--------------------------------\n";
 
   for (auto &K : KillList) {
+    dbgs() << "\n";
     if (K->getParent()) {
       K->print(dbgs());
     } else {
       dbgs() << "\n(removed)";
     }
-    dbgs() << "\n";
   }
 
   dbgs() << "\n-----------------------------------------\n";
@@ -2926,8 +2920,6 @@ PreservedAnalyses SSAPRE::run(Function &F, AnalysisManager<Function> &AM) {
 
 //===----------------------------------------------------------------------===//
 // Pass Legacy
-//
-// Do I need to keep it?
 //===----------------------------------------------------------------------===//
 
 class llvm::ssapre::SSAPRELegacy : public FunctionPass {
