@@ -74,8 +74,28 @@ IsVersionUnset(const Expression *E) {
 }
 
 // This is used as ⊥ version
+static Expression TExpr(ET_Top,    ~2U, VR_Top);
 static Expression BExpr(ET_Bottom, ~2U, VR_Bottom);
+static Expression * GetTop()    { return &TExpr; }
 static Expression * GetBottom() { return &BExpr; }
+
+bool SSAPRE::
+IsTop(const Expression *E) {
+  assert(E);
+  return E == GetTop();
+}
+
+bool SSAPRE::
+IsBottom(const Expression *E) {
+  assert(E);
+  return E == GetBottom();
+}
+
+bool SSAPRE::
+IsBottomOrVarOrConst(const Expression *E) {
+  assert(E);
+  return E == GetBottom() || IsVariableOrConstant(E);
+}
 
 ExpVector_t & SSAPRE::
 GetFactorVersions(const FactorExpression *F) {
@@ -91,18 +111,6 @@ GetExpVersions(const Expression *E) {
   auto PE = ExprToPExpr[E];
   assert(PE && !IsBottom(PE));
   return PExprToVersions[PE][E->getVersion()];
-}
-
-bool SSAPRE::
-IsBottom(const Expression *E) {
-  assert(E);
-  return E == GetBottom();
-}
-
-bool SSAPRE::
-IsBottomOrVarOrConst(const Expression *E) {
-  assert(E);
-  return E == GetBottom() || IsVariableOrConstant(E);
 }
 
 bool SSAPRE::
@@ -351,8 +359,10 @@ SetAllOperandsSave(Instruction *I) {
 void SSAPRE::
 AddSubstitution(Expression *E, Expression *S, bool Direct) {
   assert(E && S);
-  assert(ExprToPExpr[E] == ExprToPExpr[S] || IsBottomOrVarOrConst(S) &&
-      "Substituting expression must be of the same Proto or Bottom");
+  assert((ExprToPExpr[E] == ExprToPExpr[S] ||
+      IsBottomOrVarOrConst(S) ||
+      IsTop(S)) &&
+      "Substituting expression must be of the same Proto or Top or Bottom");
 
   auto *PE = ExprToPExpr[E];
   if (!PE) PE = E;
@@ -379,8 +389,6 @@ AddSubstitution(Expression *E, Expression *S, bool Direct) {
   if (
       // Any F -> E substitution serves as a jump record
       !FactorExpression::classof(E) &&
-      // Saves are useless for F
-      // !FactorExpression::classof(S) &&
       // Only if this is the first time we add this substitution
       MA[E] != S) {
     S->addSave();
@@ -393,8 +401,7 @@ Expression * SSAPRE::
 GetSubstitution(Expression *E, bool Direct) {
   assert(E);
 
-  if (VariableExpression::classof(E) || ConstantExpression::classof(E))
-    return E;
+  if (IsBottomOrVarOrConst(E) || IsTop(E)) return E;
 
   auto PE = ExprToPExpr[E];
   if (!PE) PE = E;
@@ -2380,9 +2387,11 @@ FactorGraphWalk() {
         }
       }
 
-      // Kill non-materializd factors
+      // Kill non-materializable factors
       if (!FE->getWillBeAvail() && !FE->getIsMaterialized()) {
-        KillFactor(FE, false);
+        // This forces all the expressions that point to this Factor point to
+        // the previous expression or themselves.
+        ReplaceFactor(FE, GetTop());
         continue;
       }
 
@@ -2562,6 +2571,12 @@ ApplySubstitutions() {
 
     auto VI = VExprToInst[VE];
     auto SE = GetSubstitution(VE);
+
+    // Top value forces this instruction to stay as is if there are uses
+    if (IsTop(SE)) {
+      if (!VI->getNumUses()) KillList.push_back(VI);
+      continue;
+    }
 
     if (IsBottom(SE) || VE == SE) {
       // Standard case, instruction is not used at all and is not replaced by
@@ -2784,7 +2799,7 @@ PrintDebugSubstitutions() {
       auto SI = VExprToInst[SE];
 
       if (!VE) continue;
-      if (IsBottom(VE)) continue;
+      if (IsTop(VE) || IsBottom(VE)) continue;
       if (IgnoreExpression(VE)) continue;
       if (VI && !VI->getParent()) continue;
 
@@ -2814,6 +2829,8 @@ PrintDebugSubstitutions() {
       dbgs() << " -> ";
       if (VE == SE) {
         dbgs() << "-";
+      } else if (IsTop(SE)) {
+        dbgs() << "⊤";
       } else if (IsBottom(SE)) {
         dbgs() << "⊥";
       } else if (IsVariableOrConstant(SE)) {

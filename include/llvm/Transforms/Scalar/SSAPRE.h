@@ -42,6 +42,7 @@ class TokenPropagationSolver;
 
 enum ExpressionType {
   ET_Base,
+  ET_Top,
   ET_Bottom,
   ET_Ignored,
   ET_Unknown,
@@ -77,7 +78,8 @@ inline std::string ExpressionTypeToString(ExpressionType ET) {
 typedef int ExpVersion_t;
 enum VersionRanges : ExpVersion_t {
   VR_Unset = -1,
-  VR_Bottom = -2,
+  VR_Top = -2,
+  VR_Bottom = -3,
   VR_VariableLo = -1000,
   VR_VariableHi = -1999,
   VR_ConstantLo = -2000,
@@ -680,6 +682,7 @@ private:
 
   // Check whether an Expression is a ⊥ value. It can be not only a real bottom
   // value but a constant or a variable since they do not provide a computation
+  bool IsTop(const Expression *E);
   bool IsBottom(const Expression *E);
   bool IsBottomOrVarOrConst(const Expression *E);
 
@@ -747,15 +750,15 @@ private:
 
   bool ReplaceFactor(FactorExpression * FE,
                      Expression * E,
-                     bool HRU,
+                     bool HRU = false,
                      bool Direct = false);
   void ReplaceFactorMaterialized(FactorExpression * FE,
                                  Expression * E,
-                                 bool HRU,
+                                 bool HRU = false,
                                  bool Direct = false);
   void ReplaceFactorFinalize(FactorExpression * FE,
                              Expression * E,
-                             bool HRU,
+                             bool HRU = false,
                              bool Direct = false);
 
   // This function provides global ranking of operations so that we can place
