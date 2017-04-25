@@ -1570,38 +1570,40 @@ FactorInsertion() {
       // occurance will have a bigger DFS number;
 
       // SHIT remove cycles
-      bool ShouldInsert = false;
-      SmallVector<BasicBlock *, 32> Queue;
-      DenseMap<BasicBlock *, bool> Visited;
-      Queue.push_back(B);
-      while (!Queue.empty()) {
-        auto BB = Queue.pop_back_val();
-
-        if (Visited.count(BB)) continue;
-
-        for (auto &I : *BB) {
-          auto OE = ValueToExp[&I];
-          auto OPE = ExprToPExpr[OE];
-
-          // If Proto of the occurance matches the PE we should insert here
-          if (OPE == PE) {
-            ShouldInsert = true;
-            break;
-          }
-        }
-
-        if (ShouldInsert) break;
-
-        Visited[BB] = true;
-
-        // Continue with the successors if none found
-        for (auto S : BB->getTerminator()->successors()) {
-          Queue.push_back(S);
-        }
-      }
+      // NOTE Supressing Factor addition will limit DS propagation with cycles
+      // NOTE It won't have uses anyway and we will delete it in the end
+      // bool ShouldInsert = false;
+      // SmallVector<BasicBlock *, 32> Queue;
+      // DenseMap<BasicBlock *, bool> Visited;
+      // Queue.push_back(B);
+      // while (!Queue.empty()) {
+      //   auto BB = Queue.pop_back_val();
+      //
+      //   if (Visited.count(BB)) continue;
+      //
+      //   for (auto &I : *BB) {
+      //     auto OE = ValueToExp[&I];
+      //     auto OPE = ExprToPExpr[OE];
+      //
+      //     // If Proto of the occurance matches the PE we should insert here
+      //     if (OPE == PE) {
+      //       ShouldInsert = true;
+      //       break;
+      //     }
+      //   }
+      //
+      //   if (ShouldInsert) break;
+      //
+      //   Visited[BB] = true;
+      //
+      //   // Continue with the successors if none found
+      //   for (auto S : BB->getTerminator()->successors()) {
+      //     Queue.push_back(S);
+      //   }
+      // }
 
       // If we do not insert just continue
-      if (!ShouldInsert) continue;
+      // if (!ShouldInsert) continue;
 
       // True if a Factor for this Expression with exactly the same arguments
       // exists. There are two possibilities for arguments equality, there
@@ -2388,7 +2390,8 @@ FactorGraphWalk() {
       }
 
       // Kill non-materializable factors
-      if (!FE->getWillBeAvail() && !FE->getIsMaterialized()) {
+      if ((!FE->getDownSafe() || !FE->getWillBeAvail()) &&
+            !FE->getIsMaterialized()) {
         // This forces all the expressions that point to this Factor point to
         // the previous expression or themselves.
         ReplaceFactor(FE, GetTop());
@@ -2574,6 +2577,7 @@ ApplySubstitutions() {
 
     // Top value forces this instruction to stay as is if there are uses
     if (IsTop(SE)) {
+      // No uses? GTFO
       if (!VI->getNumUses()) KillList.push_back(VI);
       continue;
     }

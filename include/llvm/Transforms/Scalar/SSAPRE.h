@@ -420,8 +420,9 @@ private:
 public:
   FactorExpression(const BasicBlock &BB)
       : Expression(ET_Factor), BB(BB), TotalPredecessors(0),
-                   Materialized(false), DownSafe(true),
-                   CanBeAvail(true), Later(true) {}
+                   Materialized(false),
+                   // These initializations must not change
+                   DownSafe(true), CanBeAvail(true), Later(false) {}
   FactorExpression() = delete;
   FactorExpression(const FactorExpression &) = delete;
   FactorExpression &operator=(const FactorExpression &) = delete;
