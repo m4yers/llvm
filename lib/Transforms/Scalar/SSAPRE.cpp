@@ -418,7 +418,7 @@ GetSubstitution(Expression *E, bool Direct) {
 
   while (auto EE = MA[E]) {
     assert(EE && "Must not be null");
-    if (IsBottom(EE)) return EE;
+    if (IsBottom(EE) || IsTop(EE)) return EE;
     if (E == EE) return E;
     E = EE;
   }
@@ -938,7 +938,10 @@ CreateFactorExpression(const Expression &PE, const BasicBlock &B) {
   // The order we add these blocks is not important, since these blocks only
   // used to get proper Operands and Versions out of the Expression.
   for (auto S = pred_begin(&B), EE = pred_end(&B); S != EE; ++S) {
-    FE->addPred((BasicBlock *)*S, FE->getVExprNum());
+    auto PB = (BasicBlock *)*S;
+    FE->addPred(PB, FE->getVExprNum());
+    // Make sure this block is reachable and make bugpoint happy
+    if (!ValueToExp[PB->getTerminator()]) FE->setVExpr(PB, GetBottom());
   }
   FE->setPExpr(&PE);
   ExprToPExpr[FE] = &PE;
@@ -2390,8 +2393,11 @@ FactorGraphWalk() {
       }
 
       // Kill non-materializable factors
-      if ((!FE->getDownSafe() || !FE->getWillBeAvail()) &&
-            !FE->getIsMaterialized()) {
+      if (!FE->getDownSafe()) {
+        ReplaceFactor(FE, GetBottom());
+        continue;
+      }
+      if (!FE->getWillBeAvail() && !FE->getIsMaterialized()) {
         // This forces all the expressions that point to this Factor point to
         // the previous expression or themselves.
         ReplaceFactor(FE, GetTop());
@@ -2493,7 +2499,7 @@ PHIInsertion() {
 
       if (Killed) {
         assert(PHIPatches.count(F) == 0 && "Uh oh");
-        ReplaceFactor(F, GetBottom(), /* HRU */ false);
+        ReplaceFactor(F, GetTop(), /* HRU */ false);
         continue;
       }
 
