@@ -567,6 +567,8 @@ public:
       if (VE) {
         if (VE->getVersion() == VR_Bottom)
           OS << "⊥";
+        else if (VE->getVersion() == VR_Top)
+          OS << "⊤";
         else
           OS << VE->getVersion();
       } else {
@@ -814,7 +816,11 @@ private:
 
   void Finalize();
 
-  bool FactorGraphWalk();
+  // The main purpose of the bottom-up walk is to lift calculations from cycles
+  // whenever possible
+  bool FactorGraphWalkBottomUp();
+  // This is pre-phi-insertion pass to remove non-materializable factors
+  bool FactorGraphWalkTopBottom();
   bool PHIInsertion();
   bool ApplySubstitutions();
   bool KillEmAll();

@@ -2241,10 +2241,10 @@ Finalize() {
 }
 
 bool SSAPRE::
-FactorGraphWalk() {
+FactorGraphWalkBottomUp() {
   bool Changed = false;
 
-  // bottom-up processing
+  // bottom-up walk
   for (auto BS = JoinBlocks.rbegin(), BE = JoinBlocks.rend(); BS != BE; ++BS) {
     auto B = (BasicBlock *)*BS;
     auto List = BlockToFactors[B];
@@ -2343,11 +2343,11 @@ FactorGraphWalk() {
         Changed = ReplaceFactor(FE, VE, HRU, /* direct */ true);
         continue; // no further processing
 
-      } else {
+      } else if (FE->getDownSafe()) {
         // The Factor must be available and must not be cycled since those are
         // processed differently, and must not be materialized because those
         // already have their operands set
-        if (FE->getWillBeAvail() && !FE->getAnyCycles() && !FE->getIsMaterialized()) {
+        if (FE->getWillBeAvail() && !FE->getIsMaterialized()) {
           auto PE = (Expression *)FE->getPExpr();
           for (auto BB : FE->getPreds()) {
             auto O = FE->getVExpr(BB);
@@ -2391,34 +2391,6 @@ FactorGraphWalk() {
           Changed = true;
         }
       }
-
-      // Kill non-materializable factors
-      if (!FE->getDownSafe()) {
-        ReplaceFactor(FE, GetBottom());
-        continue;
-      }
-      if (!FE->getWillBeAvail() && !FE->getIsMaterialized()) {
-        // This forces all the expressions that point to this Factor point to
-        // the previous expression or themselves.
-        ReplaceFactor(FE, GetTop());
-        continue;
-      }
-
-      Expression * O = nullptr;
-      bool Same = true;
-      bool HRU = false;
-      for (auto P : FE->getVExprs()) {
-        HRU |= FE->getHasRealUse(P);
-        auto PS = GetSubstitution(P);
-        if (O && O != PS) {
-          Same = false;
-          break;
-        }
-        O = PS;
-      }
-
-      // If all the ops are the same just use it
-      if (Same) ReplaceFactor(FE, O, HRU);
     }
   }
 
@@ -2426,22 +2398,16 @@ FactorGraphWalk() {
 }
 
 bool SSAPRE::
-PHIInsertion() {
+FactorGraphWalkTopBottom() {
   bool Changed = false;
 
-  // So we don't have to worry about order and back branches
-  typedef std::pair<PHINode *, BasicBlock *> PHIPatch;
-  typedef SmallVector<PHIPatch, 8> PHIPatchList;
-  DenseMap<FactorExpression *, PHIPatchList> PHIPatches;
-
   // top-down walk
-  for (auto B : *RPOT) {
+  for (auto B : JoinBlocks) {
     auto List = BlockToFactors[B];
     for (auto F : List) {
 
       // Nothing to do here
       if (F->getIsMaterialized()) continue;
-
 
       // Quick walk over Factor operands to check if we really need to insert
       // it, it is possible that the operands are all the same.
@@ -2460,30 +2426,12 @@ PHIInsertion() {
 
       // If all the ops are the same just use it
       if (Same) {
-        if (IsBottom(O) || IsTop(O)) {
-          assert(PHIPatches.count(F) == 0 && "Uh oh");
-          continue;
-        }
-
         ReplaceFactor(F, O, HRU);
-
-        // If there is a patch point awaiting this PHI
-        auto OI = (Value *)ExpToValue[O];
-        if (PHIPatches.count(F)) {
-          for (auto &PP : PHIPatches[F]) {
-            auto PPHI = PP.first;
-            auto PB = PP.second;
-            PPHI->addIncoming(OI, PB);
-          }
-        }
-
         continue;
       }
 
-      // TODO
       // We need to check whether all the arguments still present, if we
-      // encounter a bottom we cannot spawn this PHI. Generally this is not the
-      // best place for that, needs to be improved/moved.
+      // encounter a bottom we cannot spawn this PHI.
       bool Killed = false;
       for (auto P : F->getPreds()) {
         auto VE = F->getVExpr(P);
@@ -2498,10 +2446,38 @@ PHIInsertion() {
       }
 
       if (Killed) {
-        assert(PHIPatches.count(F) == 0 && "Uh oh");
-        ReplaceFactor(F, GetTop(), /* HRU */ false);
+        ReplaceFactor(F, GetTop());
         continue;
       }
+
+      if (!F->getDownSafe()) {
+        ReplaceFactor(F, GetBottom());
+        continue;
+      }
+
+      if (!F->getWillBeAvail() && !F->getIsMaterialized()) {
+        // This forces all the expressions that point to this Factor point to
+        // the previous expression or themselves.
+        ReplaceFactor(F, GetTop());
+        continue;
+      }
+
+    }
+  }
+
+  return Changed;
+}
+
+bool SSAPRE::
+PHIInsertion() {
+  bool Changed = false;
+
+  // top-down walk
+  for (auto B : JoinBlocks) {
+    for (auto F : BlockToFactors[B]) {
+
+      // Nothing to do here
+      if (F->getIsMaterialized()) continue;
 
       IRBuilder<> Builder((Instruction *)B->getFirstNonPHI());
       auto TY = F->getPExpr()->getProto()->getType();
@@ -2510,31 +2486,13 @@ PHIInsertion() {
 
       // Fill-in PHI operands
       for (auto P : F->getPreds()) {
-        auto VE = F->getVExpr(P);
-
-        // If the operand is still non-materialized Factor we create a patch
-        // point
-        auto FVE = dyn_cast<FactorExpression>(VE);
         auto REP = F->GetPredMult(P);
-        if (FVE && !FVE->getIsMaterialized()) {
-          if (!PHIPatches.count(FVE)) PHIPatches.insert({FVE, {}});
-          while (REP--) PHIPatches[FVE].push_back({PHI, P});
-        } else {
-          auto I = VExprToInst[VE];
-          while (REP--) PHI->addIncoming(I, P);
-        }
+        auto VE = F->getVExpr(P);
+        auto I = VE == F ? PHI : VExprToInst[VE];
+        while (REP--) PHI->addIncoming(I, P);
 
         // Add Save for each operand, since this Factor is live now
         VE->addSave();
-      }
-
-      // If there is a patch point awaiting this PHI
-      if (PHIPatches.count(F)) {
-        for (auto &PP : PHIPatches[F]) {
-          auto PPHI = PP.first;
-          auto PB = PP.second;
-          PPHI->addIncoming(PHI, PB);
-        }
       }
 
       // Make Factor Expression point to a real PHI
@@ -2689,8 +2647,11 @@ bool SSAPRE::
 CodeMotion() {
   bool Changed = false;
 
-  Changed |= FactorGraphWalk();
-  DEBUG(PrintDebug("CodeMotion.FactorGraphWalk"));
+  Changed |= FactorGraphWalkBottomUp();
+  DEBUG(PrintDebug("CodeMotion.FactorGraphWalkBottomUp"));
+
+  Changed |= FactorGraphWalkTopBottom();
+  DEBUG(PrintDebug("CodeMotion.FactorGraphWalkTopBottom"));
 
   Changed |= PHIInsertion();
   DEBUG(PrintDebug("CodeMotion.PHIInsertion"));
