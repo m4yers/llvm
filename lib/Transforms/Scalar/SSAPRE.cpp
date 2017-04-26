@@ -616,7 +616,7 @@ ReplaceFactorMaterialized(FactorExpression * FE, Expression * VE,
   if (!Direct)
     VE = GetSubstitution(VE);
 
-  bool IsBot = IsBottom(VE);
+  bool IsTopOrBot = IsTop(VE) || IsBottom(VE);
 
   // Add save for every real use of this PHI
   auto PHI = (PHINode *)FactorToPHI[FE];
@@ -626,7 +626,7 @@ ReplaceFactorMaterialized(FactorExpression * FE, Expression * VE,
     auto UI = (Instruction *)U;
     auto UE  = InstToVExpr[UI];
 
-    if (IsBot && !IsToBeKilled (UI) && !FactorExpression::classof(UE)) {
+    if (IsTopOrBot && !IsToBeKilled (UI) && !FactorExpression::classof(UE)) {
       llvm_unreachable("You cannot replace Factor with Bottom \
                         for a regular non-factored instruction");
     }
@@ -638,7 +638,7 @@ ReplaceFactorMaterialized(FactorExpression * FE, Expression * VE,
   }
 
   // Replace all PHI uses with a real instruction result only
-  if (!IsBot) {
+  if (!IsTopOrBot) {
     auto V = (Value *)ExpToValue[VE];
     PHI->replaceAllUsesWith(V);
   }
