@@ -804,6 +804,8 @@ private:
 
   void FactorInsertion();
 
+  void RenamePass();
+  void RenameCleaup();
   void Rename();
 
   void ResetDownSafety(FactorExpression *F, Expression *E);

@@ -626,13 +626,13 @@ ReplaceFactorMaterialized(FactorExpression * FE, Expression * VE,
     auto UI = (Instruction *)U;
     auto UE  = InstToVExpr[UI];
 
+    // Skip istructions without parents, unless they are to be inserted
+    if (!UI->getParent()) continue;
+
     if (IsTopOrBot && !IsToBeKilled (UI) && !FactorExpression::classof(UE)) {
       llvm_unreachable("You cannot replace Factor with Bottom \
                         for a regular non-factored instruction");
     }
-
-    // Skip istructions without parents, unless they are to be inserted
-    if (!UI->getParent()) continue;
 
     VE->addSave();
   }
@@ -1642,7 +1642,7 @@ FactorInsertion() {
 }
 
 void SSAPRE::
-Rename() {
+RenamePass() {
   // We assign SSA versions to each of 3 kinds of expressions:
   //   - Real expression
   //   - Factor expression
@@ -1924,7 +1924,10 @@ Rename() {
       }
     }
   }
+}
 
+void SSAPRE::
+RenameCleaup() {
   // TODO clean this up
   // TODO Redundant Factors
   // TODO 1. we need to spot redundant Factors that join differently versioned
@@ -2046,6 +2049,14 @@ Rename() {
     }
     KillFactor(F);
   }
+}
+
+void SSAPRE::
+Rename() {
+  RenamePass();
+  DEBUG(PrintDebug("Rename.Pass"));
+  RenameCleaup();
+  DEBUG(PrintDebug("Rename.Cleanup"));
 }
 
 bool SSAPRE::
@@ -2887,7 +2898,6 @@ PrintDebugKillist() {
   dbgs() << "\n-----------------------------------------\n";
 }
 
-
 void SSAPRE::
 PrintDebug(const std::string &Caption) {
   dbgs() << "\n" << Caption;
@@ -2926,7 +2936,6 @@ runImpl(Function &F,
   DEBUG(PrintDebug("STEP 1: F-Insertion"));
 
   Rename();
-  DEBUG(PrintDebug("STEP 2: Renaming"));
 
   DownSafety();
   DEBUG(PrintDebug("STEP 3: DownSafety"));
@@ -2938,8 +2947,6 @@ runImpl(Function &F,
   DEBUG(PrintDebug("STEP 5: Finalize"));
 
   Changed = CodeMotion();
-  // TODO proper erase of the deleted instructions, otherwise this fails
-  // DEBUG(PrintDebug("STEP 6: CodeMotion"));
 
   Fini();
 
