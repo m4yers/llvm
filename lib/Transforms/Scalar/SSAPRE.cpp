@@ -2472,6 +2472,11 @@ bool SSAPRE::
 PHIInsertion() {
   bool Changed = false;
 
+  // So we don't have to worry about order and back branches
+  typedef std::pair<PHINode *, BasicBlock *> PHIPatch;
+  typedef SmallVector<PHIPatch, 8> PHIPatchList;
+  DenseMap<FactorExpression *, PHIPatchList> PHIPatches;
+
   // top-down walk
   for (auto B : JoinBlocks) {
     for (auto F : BlockToFactors[B]) {
@@ -2486,13 +2491,31 @@ PHIInsertion() {
 
       // Fill-in PHI operands
       for (auto P : F->getPreds()) {
-        auto REP = F->GetPredMult(P);
         auto VE = F->getVExpr(P);
-        auto I = VE == F ? PHI : VExprToInst[VE];
-        while (REP--) PHI->addIncoming(I, P);
+
+        // If the operand is still non-materialized Factor we create a patch
+        // point
+        auto FVE = dyn_cast<FactorExpression>(VE);
+        auto REP = F->GetPredMult(P);
+        if (FVE && !FVE->getIsMaterialized()) {
+          if (!PHIPatches.count(FVE)) PHIPatches.insert({FVE, {}});
+          while (REP--) PHIPatches[FVE].push_back({PHI, P});
+        } else {
+          auto I = VExprToInst[VE];
+          while (REP--) PHI->addIncoming(I, P);
+        }
 
         // Add Save for each operand, since this Factor is live now
         VE->addSave();
+      }
+
+      // If there is a patch point awaiting this PHI
+      if (PHIPatches.count(F)) {
+        for (auto &PP : PHIPatches[F]) {
+          auto PPHI = PP.first;
+          auto PB = PP.second;
+          PPHI->addIncoming(PHI, PB);
+        }
       }
 
       // Make Factor Expression point to a real PHI
