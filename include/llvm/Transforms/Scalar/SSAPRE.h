@@ -714,6 +714,7 @@ private:
   bool OperandsDominate(const Instruction *I, const Expression *F);
 
   bool OperandsDominateStrictly(const Expression *E, const Expression *F);
+  bool OperandsDominateStrictly(const Instruction *I, const Expression *F);
 
   // Find out whether Expression versions are used on a Path before(including)
   // another Expression occurrence
@@ -816,6 +817,7 @@ private:
 
   void Finalize();
 
+  bool FactorCleanup(FactorExpression * F);
   // The main purpose of the bottom-up walk is to lift calculations from cycles
   // whenever possible
   bool FactorGraphWalkBottomUp();

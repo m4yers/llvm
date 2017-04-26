@@ -206,7 +206,12 @@ OperandsDominate(const Instruction *I, const Expression *Use) {
 
 bool SSAPRE::
 OperandsDominateStrictly(const Expression *Def, const Expression *Use) {
-  for (auto &O : VExprToInst[Def]->operands()) {
+  return OperandsDominateStrictly(VExprToInst[Def], Use);
+}
+
+bool SSAPRE::
+OperandsDominateStrictly(const Instruction *I, const Expression *Use) {
+  for (auto &O : I->operands()) {
     auto E = ValueToExp[O];
 
     // Variables or Constants occurs indefinitely before any expression
@@ -216,6 +221,8 @@ OperandsDominateStrictly(const Expression *Def, const Expression *Use) {
     // a Factor, another definition or the same definition if it defines a new
     // version.
     E = GetSubstitution(E);
+
+    if (IsVariableOrConstant(E)) continue;
 
     if (!StrictlyDominates(E, Use)) return false;
   }
@@ -2241,6 +2248,63 @@ Finalize() {
 }
 
 bool SSAPRE::
+FactorCleanup(FactorExpression * F) {
+  // Quick walk over Factor operands to check if we really need to insert
+  // it, it is possible that the operands are all the same.
+  Expression * O = nullptr;
+  bool Same = true;
+  bool HRU = false;
+  for (auto P : F->getVExprs()) {
+    HRU |= F->getHasRealUse(P);
+    auto PS = GetSubstitution(P);
+    if (O && O != PS) {
+      Same = false;
+      break;
+    }
+    O = PS;
+  }
+
+  // If all the ops are the same just use it
+  if (Same) {
+    ReplaceFactor(F, O, HRU);
+    return true;
+  }
+
+  // We need to check whether all the arguments still present, if we
+  // encounter a bottom we cannot spawn this PHI.
+  bool Killed = false;
+  for (auto P : F->getPreds()) {
+    auto VE = F->getVExpr(P);
+    auto SE = GetSubstitution(VE);
+    if (IsBottom(SE) || IsTop(SE)) {
+      Killed = true;
+      break;
+    }
+
+    // Save the substitution
+    F->setVExpr(P, SE);
+  }
+
+  if (Killed) {
+    ReplaceFactor(F, GetTop());
+    return true;
+  }
+
+  if (!F->getDownSafe() && !F->getIsMaterialized()) {
+    ReplaceFactor(F, GetBottom());
+    return true;
+  }
+
+  if (!F->getWillBeAvail() && !F->getIsMaterialized()) {
+    // This forces all the expressions that point to this Factor point to
+    // the previous expression or themselves.
+    ReplaceFactor(F, GetTop());
+    return true;
+  }
+  return false;
+}
+
+bool SSAPRE::
 FactorGraphWalkBottomUp() {
   bool Changed = false;
 
@@ -2322,8 +2386,9 @@ FactorGraphWalkBottomUp() {
           continue; // no further processing
         }
 
-        // Make sure the operands available before the Factor
-        if (!OperandsDominate(PE->getProto(), FE)) continue;
+        auto T = PB->getTerminator();
+        // Make sure the operands available at the predecessor block end
+        if (!OperandsDominateStrictly(PE->getProto(), InstToVExpr[T])) continue;
 
         // At this point we only the only concern is whether the non-cycled
         // expression exist or not. Even if it is a variable or a const it is
@@ -2351,15 +2416,20 @@ FactorGraphWalkBottomUp() {
           auto PE = (Expression *)FE->getPExpr();
           for (auto BB : FE->getPreds()) {
             auto O = FE->getVExpr(BB);
+
             // Satisfies insert if either:
-            //   - Version(O) is ⊥
-            //   - HRU(O) is False and O is Factor and WBA(O) is False
-            if (IsBottom(O)||
-                (!FE->getHasRealUse(O) &&
-                 FactorExpression::classof(O) &&
+            if (
+                // Version(O) is ⊥
+                IsBottom(O) ||
+
+                // HRU(O) is False and O is Factor and WBA(O) is False
+                (!FE->getHasRealUse(O) && FactorExpression::classof(O) &&
                  !dyn_cast<FactorExpression>(O)->getWillBeAvail())) {
 
-              auto I = PE->getProto()->clone();
+              auto PR = PE->getProto();
+              if (!OperandsDominate(PR, FE)) break;
+
+              auto I = PR->clone();
               auto VE = CreateExpression(*I);
               FE->setVExpr(BB, VE);
               AddExpression(PE, VE, I, BB);
@@ -2391,6 +2461,8 @@ FactorGraphWalkBottomUp() {
           Changed = true;
         }
       }
+
+      FactorCleanup(FE);
     }
   }
 
@@ -2405,63 +2477,8 @@ FactorGraphWalkTopBottom() {
   for (auto B : JoinBlocks) {
     auto List = BlockToFactors[B];
     for (auto F : List) {
-
-      // Nothing to do here
-      if (F->getIsMaterialized()) continue;
-
-      // Quick walk over Factor operands to check if we really need to insert
-      // it, it is possible that the operands are all the same.
-      Expression * O = nullptr;
-      bool Same = true;
-      bool HRU = false;
-      for (auto P : F->getVExprs()) {
-        HRU |= F->getHasRealUse(P);
-        auto PS = GetSubstitution(P);
-        if (O && O != PS) {
-          Same = false;
-          break;
-        }
-        O = PS;
-      }
-
-      // If all the ops are the same just use it
-      if (Same) {
-        ReplaceFactor(F, O, HRU);
-        continue;
-      }
-
-      // We need to check whether all the arguments still present, if we
-      // encounter a bottom we cannot spawn this PHI.
-      bool Killed = false;
-      for (auto P : F->getPreds()) {
-        auto VE = F->getVExpr(P);
-        auto SE = GetSubstitution(VE);
-        if (IsBottom(SE) || IsTop(SE)) {
-          Killed = true;
-          break;
-        }
-
-        // Save the substitution
-        F->setVExpr(P, SE);
-      }
-
-      if (Killed) {
-        ReplaceFactor(F, GetTop());
-        continue;
-      }
-
-      if (!F->getDownSafe()) {
-        ReplaceFactor(F, GetBottom());
-        continue;
-      }
-
-      if (!F->getWillBeAvail() && !F->getIsMaterialized()) {
-        // This forces all the expressions that point to this Factor point to
-        // the previous expression or themselves.
-        ReplaceFactor(F, GetTop());
-        continue;
-      }
-
+      if (!F->getIsMaterialized())
+        FactorCleanup(F);
     }
   }
 
