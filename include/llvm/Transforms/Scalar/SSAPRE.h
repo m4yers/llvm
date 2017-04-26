@@ -830,12 +830,22 @@ private:
   bool KillEmAll();
   bool CodeMotion();
 
+  enum PrintInfo : unsigned {
+    PI_Inst = 1 << 0,
+    PI_Expr = 1 << 1,
+    PI_Fact = 1 << 2,
+    PI_Subs = 1 << 3,
+    PI_Kill = 1 << 4,
+    PI_Default = PI_Expr | PI_Fact | PI_Subs,
+    PI_All  = ~0U
+  };
+
   void PrintDebugInstructions();
   void PrintDebugExpressions(bool PrintIgnored = false);
   void PrintDebugFactors();
   void PrintDebugSubstitutions();
   void PrintDebugKillist();
-  void PrintDebug(const std::string &Caption);
+  void PrintDebug(const std::string &Caption, PrintInfo PI = PI_Default);
 
   PreservedAnalyses
   runImpl(Function &F, AssumptionCache &_AC, TargetLibraryInfo &_TLI,

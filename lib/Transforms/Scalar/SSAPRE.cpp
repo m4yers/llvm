@@ -2698,17 +2698,19 @@ bool SSAPRE::
 CodeMotion() {
   bool Changed = false;
 
+  auto PI = (PrintInfo)(PI_Default | PI_Kill);
+
   Changed |= FactorGraphWalkBottomUp();
-  DEBUG(PrintDebug("CodeMotion.FactorGraphWalkBottomUp"));
+  DEBUG(PrintDebug("CodeMotion.FactorGraphWalkBottomUp", PI));
 
   Changed |= FactorGraphWalkTopBottom();
-  DEBUG(PrintDebug("CodeMotion.FactorGraphWalkTopBottom"));
+  DEBUG(PrintDebug("CodeMotion.FactorGraphWalkTopBottom", PI));
 
   Changed |= PHIInsertion();
-  DEBUG(PrintDebug("CodeMotion.PHIInsertion"));
+  DEBUG(PrintDebug("CodeMotion.PHIInsertion", PI));
 
   Changed |= ApplySubstitutions();
-  DEBUG(PrintDebug("CodeMotion.ApplySubstitutions"));
+  DEBUG(PrintDebug("CodeMotion.ApplySubstitutions", PI));
 
   Changed |= KillEmAll();
   // DEBUG(PrintDebug("CodeMotion.KillEmAll"));
@@ -2899,14 +2901,14 @@ PrintDebugKillist() {
 }
 
 void SSAPRE::
-PrintDebug(const std::string &Caption) {
+PrintDebug(const std::string &Caption, PrintInfo PI) {
   dbgs() << "\n" << Caption;
   dbgs() << "\n------------------------------------------------------------\n";
-  PrintDebugInstructions();
-  PrintDebugExpressions();
-  PrintDebugFactors();
-  PrintDebugSubstitutions();
-  PrintDebugKillist();
+  if (PI & PI_Inst) PrintDebugInstructions();
+  if (PI & PI_Expr) PrintDebugExpressions();
+  if (PI & PI_Fact) PrintDebugFactors();
+  if (PI & PI_Subs) PrintDebugSubstitutions();
+  if (PI & PI_Kill) PrintDebugKillist();
   dbgs() << "\n------------------------------------------------------------\n";
 }
 
