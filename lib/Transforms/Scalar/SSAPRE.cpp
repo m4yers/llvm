@@ -2454,7 +2454,7 @@ PHIInsertion() {
 
       // If all the ops are the same just use it
       if (Same) {
-        if (IsBottom(O)) {
+        if (IsBottom(O) || IsTop(O)) {
           assert(PHIPatches.count(F) == 0 && "Uh oh");
           continue;
         }
@@ -2482,7 +2482,7 @@ PHIInsertion() {
       for (auto P : F->getPreds()) {
         auto VE = F->getVExpr(P);
         auto SE = GetSubstitution(VE);
-        if (IsBottom(SE)) {
+        if (IsBottom(SE) || IsTop(SE)) {
           Killed = true;
           break;
         }
