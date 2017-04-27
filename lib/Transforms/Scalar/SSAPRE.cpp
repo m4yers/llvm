@@ -1697,9 +1697,6 @@ RenamePass() {
     // instruction's in the block
     auto FSDFS = InstrSDFS[&B->front()];
 
-    dbgs() << "\n\n" << FSDFS << " BB ";
-    B->printAsOperand(dbgs());
-
     // Backtrack the path if necessary
     while (!Path.empty() && InstrSDFS[&Path.back()->front()] > FSDFS)
       Path.pop_back();
@@ -1751,18 +1748,7 @@ RenamePass() {
       // Backtrace every stacks if we jumped up the tree
       for (auto &P : PExprToVExprStack) {
         auto &VEStack = P.getSecond();
-        if (VEStack.empty()) {
-          dbgs() << "\nEMPTY";
-          P.getFirst()->dump();
-        } else {
-          dbgs() << "\nFULL";
-          P.getFirst()->dump();
-          dbgs() << "\n\t" << VEStack.top().first << "\t";
-          VEStack.top().second->dump();
-        }
         while (!VEStack.empty() && VEStack.top().first > SDFS) {
-          dbgs() << "\nPOP " << VEStack.top().first;
-          VEStack.top().second->dump();
           VEStack.pop();
         }
       }
