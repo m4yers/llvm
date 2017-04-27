@@ -46,11 +46,11 @@ using namespace llvm::ssapre;
 
 #define DEBUG_TYPE "ssapre"
 
-STATISTIC(SSAPREInstrSaved,    "Number of instructions saved");
-STATISTIC(SSAPREInstrSubstituted, "Number of instructions substituted");
-STATISTIC(SSAPREInstrInserted, "Number of instructions inserted");
-STATISTIC(SSAPREInstrDeleted,  "Number of instructions deleted");
-STATISTIC(SSAPREBlocksAdded,   "Number of blocks deleted");
+STATISTIC(SSAPREInstrSubstituted,  "Number of instructions substituted");
+STATISTIC(SSAPREInstrInserted,     "Number of instructions inserted");
+STATISTIC(SSAPREInstrKilled,       "Number of instructions deleted");
+STATISTIC(SSAPREPHIInserted,       "Number of phi inserted");
+STATISTIC(SSAPREPHIKilled,         "Number of phi deleted");
 
 // Anchor methods.
 namespace llvm {
@@ -176,6 +176,7 @@ NotStrictlyDominates(const Expression *Def, const Expression *Use) {
 
   return DT->dominates(IDef, IUse);
 }
+
 bool SSAPRE::
 OperandsDominate(const Expression *Def, const Expression *Use) {
   return OperandsDominate(VExprToInst[Def], Use);
@@ -639,8 +640,10 @@ ReplaceFactorMaterialized(FactorExpression * FE, Expression * VE,
 
   // Replace all PHI uses with a real instruction result only
   if (!IsTopOrBot) {
+    // ??? can we delay it till the substitution
     auto V = (Value *)ExpToValue[VE];
     PHI->replaceAllUsesWith(V);
+    SSAPREInstrSubstituted++;
   }
 
   FE->setIsMaterialized(false);
@@ -1294,12 +1297,12 @@ Init(Function &F) {
   //      CFG:   RPO(CFG):        DT:       DFS(DT):     SDFS(DT):
   //
   //       a        a              a            a            a
-  //      / \     / | \          / | \        / | \        / | \
-  //     b   c   c  b  d        b  d  c  \\  c  b  d  \\  d  b  c
-  //      \ /         /            |     //       /   //   \
-  //       d         e             e             e          e
-  //       |
-  //       e
+  //      / \        \           / | \        / | \        / | \
+  //     b   c    b - c         b  d  c  \\  c  b  d  \\  d  b  c
+  //      \ /      \               |     //       /   //   \
+  //       d        d              e             e          e
+  //       |        |
+  //       e        e
   //
   //  RPO(CFG): { a, c, b, d, e } // normal cfg rpo
   //  DFS(DT):  { a, b, d, e, c } // before reorder
@@ -2232,6 +2235,8 @@ Finalize() {
     AvailDef.insert({P.getFirst(), DenseMap<int,Expression *>()});
   }
 
+  // NOTE Using DT walk here is not really necessary because this loop do not
+  // NOTE touch any successors
   auto DFI = df_begin(DT->getRootNode());
   for (auto DFE = df_end(DT->getRootNode()); DFI != DFE; ++DFI) {
     auto B = DFI->getBlock();
@@ -2441,6 +2446,7 @@ FactorGraphWalkBottomUp() {
           SetOrderBefore(I, T);
           SetAllOperandsSave(I);
           I->insertBefore(T);
+          SSAPREInstrInserted++;
           HRU = false;
         }
 
@@ -2477,6 +2483,7 @@ FactorGraphWalkBottomUp() {
               SetOrderBefore(I, T);
               SetAllOperandsSave(I);
               I->insertBefore(T);
+              SSAPREInstrInserted++;
             }
           }
 
@@ -2495,6 +2502,7 @@ FactorGraphWalkBottomUp() {
           SetOrderBefore(I, T);
           SetAllOperandsSave(I);
           I->insertBefore((Instruction *)T);
+          SSAPREInstrInserted++;
 
           ReplaceFactor(FE, VE, /* HRU */ false);
           Changed = true;
@@ -2544,6 +2552,8 @@ PHIInsertion() {
       auto TY = F->getPExpr()->getProto()->getType();
       auto PHI = Builder.CreatePHI(TY, F->getTotalPredecessors());
       PHI->setName("ssapre_phi");
+
+      SSAPREPHIInserted++;
 
       // Fill-in PHI operands
       for (auto P : F->getPreds()) {
@@ -2607,6 +2617,7 @@ ApplySubstitutions() {
 
       auto VI = VExprToInst[VE];
       VI->replaceAllUsesWith(T);
+      SSAPREInstrSubstituted++;
       KillList.push_back(VI);
       continue;
     }
@@ -2665,6 +2676,7 @@ ApplySubstitutions() {
 
     SE->addSave(RealUses);
     VI->replaceAllUsesWith(SI);
+    SSAPREInstrSubstituted++;
 
     KillList.push_back(VI);
 
@@ -2716,6 +2728,10 @@ KillEmAll() {
     auto K = KillList.pop_back_val();
     if (!K->getParent()) continue;
     K->eraseFromParent();
+    if (PHINode::classof(K))
+      SSAPREPHIKilled++;
+    else
+      SSAPREInstrKilled++;
     Changed = true;
   }
 
