@@ -1291,15 +1291,23 @@ Init(Function &F) {
   // in the opposite to RPO order. This order will give us a clue, when during
   // the normal traversal we go up the tree. For example:
   //
-  //   CFG:    DT:
+  //      CFG:   RPO(CFG):        DT:       DFS(DT):     SDFS(DT):
   //
-  //    a       a     RPO(CFG): { a, c, b, d, e } // normal cfg rpo
-  //   / \    / | \   DFS(DT):  { a, b, d, e, c } // before reorder
-  //  b   c  b  d  c  DFS(DT):  { a, c, b, d, e } // after reorder
-  //   \ /      |
-  //    d       e     SDFS(DT): { a, d, e, b, c } // after reverse reorder
-  //    |             SDFSO(DFS(DT),SDFS(DT)): { 1, 5, 4, 2, 3 }
-  //    e                                          <  >  >  <
+  //       a        a              a            a            a
+  //      / \     / | \          / | \        / | \        / | \
+  //     b   c   c  b  d        b  d  c  \\  c  b  d  \\  d  b  c
+  //      \ /         /            |     //       /   //   \
+  //       d         e             e             e          e
+  //       |
+  //       e
+  //
+  //  RPO(CFG): { a, c, b, d, e } // normal cfg rpo
+  //  DFS(DT):  { a, b, d, e, c } // before reorder
+  //  DFS(DT):  { a, c, b, d, e } // after reorder
+  //
+  //  SDFS(DT): { a, d, e, b, c } // after reverse reorder
+  //  SDFSO(DFS(DT),SDFS(DT)): { 1, 5, 4, 2, 3 }
+  //                               <  >  >  <
   //
   // So this SDFSO which maps our RPOish DFS(DT) onto SDFS order gives us
   // points where we must backtrace our context(stack or whatever we keep
@@ -1324,6 +1332,18 @@ Init(Function &F) {
     auto B = DFI->getBlock();
     auto BlockRange = AssignDFSNumbers(B, ICount, &InstrSDFS, nullptr);
     ICount += BlockRange.second - BlockRange.first + ICountGrowth;
+  }
+
+  // Return DT to RPO order
+  for (auto &B : *RPOT) {
+    auto *Node = DT->getNode(B);
+    if (Node->getChildren().size() > 1) {
+      std::sort(Node->begin(), Node->end(),
+                [&RPOOrdering](const DomTreeNode *A, const DomTreeNode *B) {
+                  // NOTE here we are using the reversed operator
+                  return RPOOrdering[A] < RPOOrdering[B];
+                });
+    }
   }
 }
 
@@ -1670,10 +1690,15 @@ RenamePass() {
     PExprToVExprStack.insert({PE, {}});
   }
 
-  for (auto B : *RPOT) {
+  auto DFI = df_begin(DT->getRootNode());
+  for (auto DFE = df_end(DT->getRootNode()); DFI != DFE; ++DFI) {
+    auto B = DFI->getBlock();
     // Since factors live outside basic blocks we set theirs DFS as the first
     // instruction's in the block
     auto FSDFS = InstrSDFS[&B->front()];
+
+    dbgs() << "\n\n" << FSDFS << " BB ";
+    B->printAsOperand(dbgs());
 
     // Backtrack the path if necessary
     while (!Path.empty() && InstrSDFS[&Path.back()->front()] > FSDFS)
@@ -1726,7 +1751,18 @@ RenamePass() {
       // Backtrace every stacks if we jumped up the tree
       for (auto &P : PExprToVExprStack) {
         auto &VEStack = P.getSecond();
+        if (VEStack.empty()) {
+          dbgs() << "\nEMPTY";
+          P.getFirst()->dump();
+        } else {
+          dbgs() << "\nFULL";
+          P.getFirst()->dump();
+          dbgs() << "\n\t" << VEStack.top().first << "\t";
+          VEStack.top().second->dump();
+        }
         while (!VEStack.empty() && VEStack.top().first > SDFS) {
+          dbgs() << "\nPOP " << VEStack.top().first;
+          VEStack.top().second->dump();
           VEStack.pop();
         }
       }
@@ -2727,7 +2763,8 @@ PrintDebugInstructions() {
 
   for (auto &B : *RPOT) {
     for (auto &I : *B) {
-      dbgs() << "\n" << InstrDFS[&I];
+      dbgs() << "\n" << InstrSDFS[&I];
+      dbgs() << "\t" << InstrDFS[&I];
       dbgs() << "\t" << I;
     }
   }
