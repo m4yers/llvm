@@ -2231,7 +2231,10 @@ Finalize() {
   for (auto &P : PExprToInsts) {
     AvailDef.insert({P.getFirst(), DenseMap<int,Expression *>()});
   }
-  for (auto B : *RPOT) {
+
+  auto DFI = df_begin(DT->getRootNode());
+  for (auto DFE = df_end(DT->getRootNode()); DFI != DFE; ++DFI) {
+    auto B = DFI->getBlock();
 
     for (auto F : BlockToFactors[B]) {
       auto V = F->getVersion();
