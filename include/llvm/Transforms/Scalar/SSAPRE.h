@@ -565,12 +565,17 @@ public:
       OS << ":";
       auto VE = getVExpr(B);
       if (VE) {
-        if (VE->getVersion() == VR_Bottom)
+        if (VE->getVersion() == VR_Bottom) {
           OS << "⊥";
-        else if (VE->getVersion() == VR_Top)
+        } else if (VE->getVersion() == VR_Top) {
           OS << "⊤";
-        else
-          OS << VE->getVersion();
+        } else {
+          auto V = VE->getVersion();
+          if (FactorExpression::classof(VE))
+            OS << "F(" << V << ")";
+          else
+            OS << V;
+        }
       } else {
         OS << "×";
       }

@@ -539,9 +539,9 @@ KillFactor(FactorExpression *F, bool BottomSubstitute) {
     FactorToPHI[F] = nullptr;
 
     // Replace the FactorExpression with a regular PHIExpression
-    auto P = CreateExpression(*PHI);
     auto E = CreateExpression(*PHI);
-    AddExpression(P, E, PHI, PHI->getParent());
+    // NOTE we use the PE
+    AddExpression((Expression *)F->getPExpr(), E, PHI, PHI->getParent());
   }
 }
 
@@ -2047,7 +2047,10 @@ RenameCleaup() {
     if (auto P = F->getProto()) {
       P->dropAllReferences();
     }
+
+    auto PHI = FactorToPHI[F];
     KillFactor(F);
+    AddSubstitution(F, PHI ? InstToVExpr[PHI] : GetTop());
   }
 }
 
