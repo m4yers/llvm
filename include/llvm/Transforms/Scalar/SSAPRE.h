@@ -161,9 +161,7 @@ public:
   }
 
   void print(raw_ostream &OS) const {
-    OS << "{ ";
     printInternal(OS);
-    OS << "}";
   }
 
   void dump() const { print(dbgs()); }
@@ -811,6 +809,7 @@ private:
 
   void RenamePass();
   void RenameCleaup();
+  void RenameInductivityPass();
   void Rename();
 
   void ResetDownSafety(FactorExpression *F, Expression *E);

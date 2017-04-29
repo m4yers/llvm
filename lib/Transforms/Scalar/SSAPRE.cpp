@@ -2006,6 +2006,20 @@ RenameCleaup() {
     }
   }
 
+
+  for (auto F : FactorKillList) {
+    if (auto P = F->getProto()) {
+      P->dropAllReferences();
+    }
+
+    auto PHI = FactorToPHI[F];
+    KillFactor(F);
+    AddSubstitution(F, PHI ? InstToVExpr[PHI] : GetTop());
+  }
+}
+
+void SSAPRE::
+RenameInductivityPass() {
   // TODO this whole induction thing is way too simple
   // This maps induction expressions to its cycle head we could find so far. We
   // gonna iterate over their users and add them too, deleting any using
@@ -2018,7 +2032,10 @@ RenameCleaup() {
     Induction_t(const BasicBlock *H, const Expression *PE)
       : H(H), PE(PE) {}
   };
+
   SmallVector<Induction_t, 8> Inductions;
+  SmallPtrSet<FactorExpression *, 32> FactorKillList;
+
 
   // Determine cyclic Factors of whats left
   for (auto F : FExprs) {
@@ -2068,7 +2085,11 @@ RenameCleaup() {
   }
 
   // Remove all stuff related
+  DEBUG(dbgs() << "\nInduction.Kill:");
   for (auto F : FactorKillList) {
+    DEBUG(dbgs() << "\n");
+    DEBUG(F->dump());
+
     if (auto P = F->getProto()) {
       P->dropAllReferences();
     }
@@ -2077,6 +2098,7 @@ RenameCleaup() {
     KillFactor(F);
     AddSubstitution(F, PHI ? InstToVExpr[PHI] : GetTop());
   }
+  DEBUG(dbgs() << "\n");
 }
 
 void SSAPRE::
@@ -2085,6 +2107,8 @@ Rename() {
   DEBUG(PrintDebug("Rename.Pass"));
   RenameCleaup();
   DEBUG(PrintDebug("Rename.Cleanup"));
+  RenameInductivityPass();
+  DEBUG(PrintDebug("Rename.InductivityPass"));
 }
 
 bool SSAPRE::
