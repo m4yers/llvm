@@ -736,7 +736,8 @@ private:
 
   void SetOrderBefore(Instruction *I, Instruction *B);
   void SetAllOperandsSave(Instruction *I);
-  void AddSubstitution(Expression *E, Expression *S, bool Direct = false);
+  void AddSubstitution(Expression *E, Expression *S,
+                       bool Direct = false, bool Force = false);
   void RemSubstitution(Expression *E);
 
   // Go through all the Substitutions of the Expression and return the most

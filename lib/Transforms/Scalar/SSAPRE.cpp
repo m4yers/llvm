@@ -365,9 +365,10 @@ SetAllOperandsSave(Instruction *I) {
 }
 
 void SSAPRE::
-AddSubstitution(Expression *E, Expression *S, bool Direct) {
+AddSubstitution(Expression *E, Expression *S, bool Direct, bool Force) {
   assert(E && S);
-  assert((ExprToPExpr[E] == ExprToPExpr[S] ||
+  assert((Force ||
+      ExprToPExpr[E] == ExprToPExpr[S] ||
       IsBottomOrVarOrConst(S) ||
       IsTop(S)) &&
       "Substituting expression must be of the same Proto or Top or Bottom");
@@ -541,8 +542,10 @@ KillFactor(FactorExpression *F, bool BottomSubstitute) {
 
     // Replace the FactorExpression with a regular PHIExpression
     auto E = CreateExpression(*PHI);
+    auto P = CreateExpression(*PHI);
     // NOTE we use the PE
-    AddExpression((Expression *)F->getPExpr(), E, PHI, PHI->getParent());
+    // AddExpression((Expression *)F->getPExpr(), E, PHI, PHI->getParent());
+    AddExpression(P, E, PHI, PHI->getParent());
   }
 }
 
@@ -2050,8 +2053,26 @@ RenameInductivityPass() {
       // blocks but will find more induction expressions
       if (IsInductionExpression(F, VE)) {
         auto H = FactorToBlock[F];
-        Inductions.push_back({H, ExprToPExpr[VE]});
+        auto PE = ExprToPExpr[VE];
+        Inductions.push_back({H, PE});
         FactorKillList.insert(F);
+        AddSubstitution(VE, VE);
+
+        // Find all the Factors within the loop that share the same PE
+        auto HDFS = InstrDFS[&H->front()];
+        auto IDFS = InstrDFS[VExprToInst[VE]];
+        for (auto IF : FExprs) {
+          if (IF->getPExpr() != PE) continue;
+          auto IFB = FactorToBlock[IF];
+
+          // This checks whether this Factor is within the cycle by assurring
+          // its containing block's dfs is between header block's and induction
+          // instruction's
+          auto DFS = InstrDFS[&IFB->front()];
+          if (DFS < HDFS || DFS > IDFS) continue;
+
+          FactorKillList.insert(IF);
+        }
         break;
       }
 
@@ -2095,8 +2116,10 @@ RenameInductivityPass() {
     }
 
     auto PHI = FactorToPHI[F];
+    auto REP = PHI ? InstToVExpr[PHI] : GetTop();
     KillFactor(F);
-    AddSubstitution(F, PHI ? InstToVExpr[PHI] : GetTop());
+    // AddSubstitution(F, GetTop());
+    AddSubstitution(F, REP, /* direct */ true, /* force */ true);
   }
   DEBUG(dbgs() << "\n");
 }
