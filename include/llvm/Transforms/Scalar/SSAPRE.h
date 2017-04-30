@@ -63,6 +63,8 @@ enum ExpressionType {
 
 inline std::string ExpressionTypeToString(ExpressionType ET) {
   switch (ET) {
+  case ET_Top:       return "ExpressionTypeTop";
+  case ET_Bottom:    return "ExpressionTypeBottom";
   case ET_Ignored:   return "ExpressionTypeIgnored";
   case ET_Unknown:   return "ExpressionTypeUnknown";
   case ET_Basic:     return "ExpressionTypeBasic";

@@ -2059,17 +2059,17 @@ RenameInductivityPass() {
         AddSubstitution(VE, VE);
 
         // Find all the Factors within the loop that share the same PE
-        auto HDFS = InstrDFS[&H->front()];
-        auto IDFS = InstrDFS[VExprToInst[VE]];
+        // auto HDFS = InstrDFS[&H->front()];
+        // auto IDFS = InstrDFS[VExprToInst[VE]];
         for (auto IF : FExprs) {
           if (IF->getPExpr() != PE) continue;
-          auto IFB = FactorToBlock[IF];
+          // auto IFB = FactorToBlock[IF];
 
           // This checks whether this Factor is within the cycle by assurring
           // its containing block's dfs is between header block's and induction
           // instruction's
-          auto DFS = InstrDFS[&IFB->front()];
-          if (DFS < HDFS || DFS > IDFS) continue;
+          // auto DFS = InstrDFS[&IFB->front()];
+          // if (DFS < HDFS || DFS > IDFS) continue;
 
           FactorKillList.insert(IF);
         }
