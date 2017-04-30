@@ -1429,9 +1429,9 @@ FactorInsertion() {
           break;
         }
 
-        // A variable or a constant regarded as Top value
+        // A variable or a constant regarded as Bottom value
         if (IsVariableOrConstant(OVE)) {
-          TOK = CalculateToken(TOK, GetTopTok());
+          TOK = CalculateToken(TOK, GetBotTok());
           if (!TopMostBottomBlock) {
             TopMostBottomBlock = BB;
           } else if (DT->dominates(BB, TopMostBottomBlock)) {
