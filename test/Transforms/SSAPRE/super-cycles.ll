@@ -1,6 +1,7 @@
 ; RUN: opt < %s -ssapre -S | FileCheck %s
 target datalayout = "e-p:64:64:64-p1:16:16:16-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:32:64-f32:32:32-f64:64:64-v64:64:64-v128:128:128-a0:0:64-n8:16:32:64"
 
+; Acting conservatively we cannot change here anything
 ; CHECK-LABEL: @super_cycle_1(
 ; CHECK:       br
 ; CHECK:       phi
@@ -111,10 +112,11 @@ define i64 @super_cycle_3(i64, i8**) #0 {
 ; CHECK:       br
 ; CHECK:       br
 ; CHECK:       br
-; CHECK:       br
-; CHECK:       br
-; CHECK:       br
 ; CHECK:       add
+; CHECK:       br
+; CHECK:       br
+; CHECK:       br
+; CHECK:       phi
 ; CHECK:       ret
 define i32 @super_cycle_4(i32, i8**) #0 {
   br label %3
