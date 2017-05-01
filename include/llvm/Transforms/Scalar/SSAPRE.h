@@ -695,6 +695,7 @@ private:
   bool IsBottomOrVarOrConst(const Expression *E);
 
   bool IsVariableOrConstant(const Expression *E);
+  bool IsVariableOrConstant(const Value *V);
   bool IsFactoredPHI(Instruction *I);
 
   // Check whether an Expression is Inductive, in a sense that it uses a

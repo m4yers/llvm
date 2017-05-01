@@ -121,6 +121,14 @@ IsVariableOrConstant(const Expression *E) {
 }
 
 bool SSAPRE::
+IsVariableOrConstant(const Value *V) {
+  assert(V);
+  return Argument::classof(V) ||
+         GlobalValue::classof(V) ||
+         Constant::classof(V);
+}
+
+bool SSAPRE::
 IsFactoredPHI(Instruction *I) {
   assert(I);
   if (auto PHI = dyn_cast<PHINode>(I)) {
@@ -1046,9 +1054,6 @@ CreateExpression(Instruction &I) {
 //===----------------------------------------------------------------------===//
 
 // PHI operands Prototype solver
-// NOTE The Solver works on assumption that there is only two incoming values.
-// NOTE I'm sure there is a pass that converts n-phi nodes to 2-phi nodes, or
-// NOTE it should be created anyway.
 namespace llvm {
 namespace ssapre {
 namespace phi_factoring {
@@ -1111,7 +1116,18 @@ typedef DenseMap<const PHINode *, PropDstVector_t> SrcPropMap_t;
 typedef DenseMap<const PHINode *, bool> SrcKillMap_t;
 typedef SmallVector<const PHINode *, 8> PHIVector_t;
 
+enum TokenPropagationSolverType {
+  // Accurate solver does gurantee that all factors it contains after the
+  // executation have corret Token(PE) assigned to them
+  TPST_Accurate,
+  // Approximation takes somewhat more optimistic way using Top value for
+  // constants and variables, this allows to match non-materialized factors to
+  // PHIs. It is useful to prevent addition of superfluous Factors.
+  TPST_Approximation
+};
+
 class TokenPropagationSolver {
+  TokenPropagationSolverType TPST;
   SSAPRE &O;
   PHIFactorMap_t PHIFactorMap;
   PHITokenMap_t PHITokenMap;
@@ -1120,7 +1136,8 @@ class TokenPropagationSolver {
 
 public:
   TokenPropagationSolver() = delete;
-  TokenPropagationSolver(SSAPRE &O) : O(O) {}
+  TokenPropagationSolver(TokenPropagationSolverType TPST, SSAPRE &O)
+    : TPST(TPST), O(O) {}
 
   void
   CreateFactor(const PHINode *PHI, Token_t PE) {
@@ -1138,8 +1155,9 @@ public:
 
   Token_t
   GetTokenFor(const PHINode *PHI) {
-    assert(HasTokenFor(PHI) && "Well...");
-    return PHITokenMap[PHI];
+    if (HasFactorFor(PHI))
+      return PHITokenMap[PHI];
+    return GetBotTok();
   }
 
   bool
@@ -1153,22 +1171,7 @@ public:
     return PHIFactorMap[PHI];
   }
 
-  PHIFactorMap_t
-  GetLiveFactors() {
-    // Erase all killed Factors before returning the Map
-    DEBUG(dbgs() << "\n\nKilledNonLiveFactors");
-    DEBUG(dbgs() << "\n---------------------------");
-    for (auto P : SrcKillMap) {
-      if (P.getSecond()) {
-        DEBUG(dbgs() << "\n");
-        DEBUG(P.getFirst()->print(dbgs()));
-        O.ExpressionAllocator.Deallocate(P.getFirst());
-        PHIFactorMap.erase(P.getFirst());
-      }
-    }
-    DEBUG(dbgs() << "\n---------------------------\n");
-    return PHIFactorMap;
-  }
+  PHIFactorMap_t GetLiveFactors() { return PHIFactorMap; }
 
   void
   AddPropagations(Token_t T, const PHINode *S, PHIVector_t DL) {
@@ -1191,6 +1194,7 @@ public:
   FinishPropagation(Token_t T, const PHINode *PHI) {
     assert(!SrcKillMap[PHI] && "The Factor is already killed");
 
+    if (!HasFactorFor(PHI)) CreateFactor(PHI, T);
     PHITokenMap[PHI] = T;
 
     // Either Top or Bottom results in deletion of the Factor
@@ -1198,11 +1202,152 @@ public:
       SrcKillMap[PHI] = true;
     }
 
+    if (!SrcPropMap.count(PHI)) return;
+
     // Recursively finish every propagation
     for (auto &PD : SrcPropMap[PHI]) {
       auto R = CalculateToken(T, PD.TOK);
       FinishPropagation(R, PD.DST);
     }
+  }
+
+  void
+  Cleanup() {
+    // Erase all killed Factors before returning the Map
+    DEBUG(dbgs() << "\n\nKilledNonLiveFactors");
+    DEBUG(dbgs() << "\n---------------------------");
+    for (auto P : SrcKillMap) {
+      if (P.getSecond()) {
+        DEBUG(dbgs() << "\n");
+        DEBUG(P.getFirst()->print(dbgs()));
+        O.ExpressionAllocator.Deallocate(P.getFirst());
+        PHIFactorMap.erase(P.getFirst());
+      }
+    }
+    DEBUG(dbgs() << "\n---------------------------\n");
+  }
+
+  void
+  Solve() {
+    // We examine in each join block first to find already "materialized" Factors
+    for (auto B : O.JoinBlocks) {
+      for (auto &I : *B) {
+
+        // When we reach first non-phi instruction we stop
+        if (&I == B->getFirstNonPHI()) break;
+
+        auto PHI = dyn_cast<PHINode>(&I);
+        if (!PHI) continue;
+
+        // Token is a meet of all the PHI's operands. We optimistically set it
+        // initially to Top
+        Token_t TOK = GetTopTok();
+
+        // Back Branch source
+        const PHINode * BackBranch = nullptr;
+
+        BasicBlock * TopMostBottomBlock = nullptr;
+        SmallPtrSet<Expression *, 4> NonBottomArgs;
+
+        for (unsigned i = 0, l = PHI->getNumOperands(); i < l; ++i) {
+          auto Op = PHI->getOperand(i);
+          auto BB = PHI->getIncomingBlock(i);
+          auto OVE = O.ValueToExp[Op];
+
+          // Ignored expressions produce Bottom value right away
+          if (IgnoredExpression::classof(OVE) ||
+              UnknownExpression::classof(OVE)) {
+            TOK = GetBotTok();
+            break;
+          }
+
+          // A variable or a constant regarded as Bottom value
+          if (O.IsVariableOrConstant(OVE)) {
+            TOK = CalculateToken(TOK,
+                TPST == TPST_Approximation ? GetTopTok() : GetBotTok());
+            if (!TopMostBottomBlock) {
+              TopMostBottomBlock = BB;
+            } else if (O.DT->dominates(BB, TopMostBottomBlock)) {
+              TopMostBottomBlock = BB;
+            }
+
+            continue;
+          }
+
+          if (auto OPHI = dyn_cast<PHINode>(Op)) {
+            if (O.InstrDFS[Op] > O.InstrDFS[PHI]) {
+              // This is a back-branch and the operand is not yet processed by
+              // this loop.  We will use a rolling Token that will provide us
+              // with a current value that we propagate upwards. Once we reached
+              // the top we will verify whether our assumption was correct. If it
+              // was, all the PHIs we have visited and are using the same Token
+              // will assume this Token as a PE of its operand.  The propagation
+              // process stops if we encounter that the rest of the operands are
+              // either Expression with the same PE or Constant or Variable or
+              // Nothing in this case it is a success; or we encounter Expression
+              // with different PE, this is a failure case.
+              TOK = CalculateToken(TOK, GetTopTok());
+              assert(!BackBranch && "Must not be a second Back Branch");
+              BackBranch = OPHI;
+              continue;
+            }
+
+            // If the User is a PHI and it is linked to a Factor already, this
+            // means this PHI/Factor joins expressions of the same type
+            if (auto FOVE = O.PHIToFactor[OPHI]) {
+              TOK = CalculateToken(TOK, FOVE->getPExpr());
+
+              // Another back-branched PHI
+            } else if (HasFactorFor(OPHI)) {
+              // If we already know the Token for this PHI, use it, otherwise it
+              // is Bottom
+              Token_t T = HasTokenFor(OPHI)
+                ? GetTokenFor(OPHI)
+                : GetTopTok();
+              TOK = CalculateToken(TOK, T);
+
+              // Otherwise it is Bottom
+            } else {
+              TOK = CalculateToken(TOK, GetBotTok());
+            }
+            continue;
+            // Otherwise we use whatever this VE is prototyped by
+          } else {
+            TOK = CalculateToken(TOK, O.ExprToPExpr[OVE]);
+            NonBottomArgs.insert(OVE);
+            continue;
+          }
+        }
+
+        // If there any bottom arguments we need to verify that all other
+        // argument expressions' arguments dominate this bottom's origin basic
+        // block
+        if (TOK != GetBotTok() && TopMostBottomBlock) {
+          for (auto VE : NonBottomArgs) {
+            auto T = O.InstToVExpr[TopMostBottomBlock->getTerminator()];
+            // The first term checks whether VE's operands dominate every
+            // bottoms' origin blocks. The second term is a special case for
+            // cycles, if VE is a back-branch we can still use this PHI as a
+            // Factor.
+            if (!O.OperandsDominate(VE, T) &&
+                !O.DT->dominates(PHI, O.VExprToInst[VE])) {
+              TOK = GetBotTok();
+              break;
+            }
+          }
+        }
+
+        // This PHI has back branches and we are still not sure whether it is a
+        // materialized Factor.
+        if (BackBranch) {
+          AddPropagation(TOK, BackBranch, PHI);
+        } else {
+          FinishPropagation(TOK, PHI);
+        }
+      }
+    }
+
+    Cleanup();
   }
 };
 } // namespace phi_factoring
@@ -1395,151 +1540,8 @@ Fini() {
 void SSAPRE::
 FactorInsertion() {
   using namespace phi_factoring;
-  TokenPropagationSolver TokSolver(*this);
-
-  // We examine in each join block first to find already "materialized" Factors
-  for (auto B : JoinBlocks) {
-    for (auto &I : *B) {
-
-      // When we reach first non-phi instruction we stop
-      if (&I == B->getFirstNonPHI()) break;
-
-      auto PHI = dyn_cast<PHINode>(&I);
-      if (!PHI) continue;
-
-      // Token is a meet of all the PHI's operands. We optimistically set it
-      // initially to Top
-      Token_t TOK = GetTopTok();
-
-      // Back Branch source
-      const PHINode * BackBranch = nullptr;
-
-      BasicBlock * TopMostBottomBlock = nullptr;
-      SmallPtrSet<Expression *, 4> NonBottomArgs;
-
-      for (unsigned i = 0, l = PHI->getNumOperands(); i < l; ++i) {
-        auto Op = PHI->getOperand(i);
-        auto BB = PHI->getIncomingBlock(i);
-        auto OVE = ValueToExp[Op];
-
-        // Ignored expressions produce Bottom value right away
-        if (IgnoredExpression::classof(OVE) ||
-            UnknownExpression::classof(OVE)) {
-          TOK = GetBotTok();
-          break;
-        }
-
-        // A variable or a constant regarded as Bottom value
-        if (IsVariableOrConstant(OVE)) {
-          TOK = CalculateToken(TOK, GetBotTok());
-          if (!TopMostBottomBlock) {
-            TopMostBottomBlock = BB;
-          } else if (DT->dominates(BB, TopMostBottomBlock)) {
-            TopMostBottomBlock = BB;
-          }
-
-          continue;
-        }
-
-        if (auto OPHI = dyn_cast<PHINode>(Op)) {
-          if (InstrDFS[Op] > InstrDFS[PHI]) {
-            // This is a back-branch and the operand is not yet processed by
-            // this loop.  We will use a rolling Token that will provide us
-            // with a current value that we propagate upwards. Once we reached
-            // the top we will verify whether our assumption was correct. If it
-            // was, all the PHIs we have visited and are using the same Token
-            // will assume this Token as a PE of its operand.  The propagation
-            // process stops if we encounter that the rest of the operands are
-            // either Expression with the same PE or Constant or Variable or
-            // Nothing in this case it is a success; or we encounter Expression
-            // with different PE, this is a failure case.
-            TOK = CalculateToken(TOK, GetTopTok());
-            assert(!BackBranch && "Must not be a second Back Branch");
-            BackBranch = OPHI;
-            continue;
-          }
-
-          // If the User is a PHI and it is linked to a Factor already, this
-          // means this PHI/Factor joins expressions of the same type
-          if (auto FOVE = PHIToFactor[OPHI]) {
-            TOK = CalculateToken(TOK, FOVE->getPExpr());
-
-          // Another back-branched PHI
-          } else if (TokSolver.HasFactorFor(OPHI)) {
-            // If we already know the Token for this PHI, use it, otherwise it
-            // is Bottom
-            Token_t T = TokSolver.HasTokenFor(OPHI)
-                          ? TokSolver.GetTokenFor(OPHI)
-                          : GetTopTok();
-            TOK = CalculateToken(TOK, T);
-
-          // Otherwise it is Bottom
-          } else {
-            TOK = CalculateToken(TOK, GetBotTok());
-          }
-          continue;
-        // Otherwise we use whatever this VE is prototyped by
-        } else {
-          TOK = CalculateToken(TOK, ExprToPExpr[OVE]);
-          NonBottomArgs.insert(OVE);
-          continue;
-        }
-      }
-
-      // If there any bottom arguments we need to verify that all other
-      // argument expressions' arguments dominate this bottom's origin basic
-      // block
-      if (TOK != GetBotTok() && TopMostBottomBlock) {
-        for (auto VE : NonBottomArgs) {
-          auto T = InstToVExpr[TopMostBottomBlock->getTerminator()];
-          // The first term checks whether VE's operands dominate every
-          // bottoms' origin blocks. The second term is a special case for
-          // cycles, if VE is a back-branch we can still use this PHI as a
-          // Factor.
-          if (!OperandsDominate(VE, T) &&
-              !DT->dominates(PHI, VExprToInst[VE])) {
-            TOK = GetBotTok();
-            break;
-          }
-        }
-      }
-
-      // This PHI has back branches and we are still not sure whether it is a
-      // materialized Factor.
-      if (BackBranch) {
-
-        // It is not a materialized Factor for sure
-        if (IsBotTok(TOK)) break;
-
-        // Now we have either an Expression or Top value to propagate
-        // upwards. We get/create Factors for current PHI and its cycle PHI
-        // operands and link them appropriately.
-        TokSolver.AddPropagation(TOK, BackBranch, PHI);
-
-      // Otherwise we have a certain result for this PHI
-      } else {
-        // If there is a dependency on this PHI, finish it and wait till all
-        // the propagations are done
-        if (TokSolver.HasFactorFor(PHI)) {
-          TokSolver.FinishPropagation(TOK, PHI);
-
-        // Or if the result is an Expression we just create a new Factor
-        } else if (!IsTopOrBottomTok(TOK) && !IgnoreExpression(TOK)) {
-          auto F = CreateFactorExpression(*TOK, *B);
-
-          AddFactor(F, TOK, B);
-          MaterializeFactor(F, (PHINode *)PHI);
-
-          // Set already know expression versions
-          for (unsigned i = 0, l = PHI->getNumOperands(); i < l; ++i) {
-            auto B = PHI->getIncomingBlock(i);
-            auto UVE = ValueToExp[PHI->getOperand(i)];
-            F->setVExpr(B, UVE);
-          }
-        }
-      }
-    }
-  }
+  TokenPropagationSolver TokSolver(TPST_Accurate, *this);
+  TokSolver.Solve();
 
   // Process proven-to-be materialized Factor/PHIs
   for (auto &P : TokSolver.GetLiveFactors()) {
@@ -1963,61 +1965,82 @@ RenameCleaup() {
   // TODO 2. Newly versioned factors that are the same as linked factors
 
   SmallPtrSet<FactorExpression *, 32> FactorKillList;
-  for (auto P : FactorToPHI) {
-    auto MF = (FactorExpression *)P.getFirst();
-    for (auto F : FExprs) {
 
-      if (F->getBB() != MF->getBB()) continue;
-      if (F->getPExpr() != MF->getPExpr()) continue;
-      if (F->getIsMaterialized() || MF == F) continue;
+  // We are interested only in comparing the non-materialized Factors and any
+  // PHIs. The key idea here is that if a PHI is to have a Factor it would have
+  // one already, and if all the operands of this comparison match we delete
+  // the Factor for that same reason. This is a cleanup pass due to the
+  // distinction between materialized and non-materialized Factor insertion.
+  // See FactorInsertion routine for materialized Factors propagation.
+  using namespace phi_factoring;
+  TokenPropagationSolver TokSolver(TPST_Approximation, *this);
+  TokSolver.Solve();
+  for (auto B : JoinBlocks) {
+    for (auto F : BlockToFactors[B]) {
+      if (F->getIsMaterialized()) continue;
 
-      bool Same = true;
-      for (auto BB : F->getPreds()) {
-        auto MFVE = MF->getVExpr(BB);
-        auto FVE = F->getVExpr(BB);
+      for (auto &I : *B) {
+        if (&I == B->getFirstNonPHI()) break;
 
-        // NOTE
-        // Kinda a special case, while assigning versioned expressions to a
-        // Factor we cannot infer that a variable or a constant is coming from
-        // the predecessor and we assign it to ⊥, but a Linked Factor will know
-        // for sure whether a constant/variable is involved.
-        // FIXME All other expressions' arguments MUST dominate this bottom
-        // FIXME quasi-expression
-        if (IsVariableOrConstant(MFVE) && IsBottom(FVE)) {
-          continue;
-        }
+        auto PHI = dyn_cast<PHINode>(&I);
+        if (!PHI) continue;
+        if (PHI->getNumOperands() != F->getVExprNum()) continue;
 
-        // NOTE
-        // Yet another special case, since we do not add same version on the
-        // stack it is possible to have a Factor as an operand of itself, this
-        // happens for back branches only. We treat such an operand as a bottom
-        // and ignore it.
-        if (FVE == MF || FVE == F) continue;
+        auto PF = TokSolver.GetTokenFor(PHI);
+        if (PF != F->getPExpr()) continue;
 
-        // The actual instances is of no use, since MFactor can cointain real
-        // expression the other Factor may contain the MFactor as operand
-        // if those expressions never used
-        if (MFVE->getVersion() != FVE->getVersion()) {
-          Same = false;
+        bool Skip = false;
+        bool Kill = true;
+        for (unsigned i = 0, l = PHI->getNumOperands(); i < l; ++i) {
+          auto PIB = PHI->getIncomingBlock(i);
+          auto PV = PHI->getIncomingValueForBlock(PIB);
+          auto FVE = F->getVExpr(PIB);
+
+          // NOTE
+          // Kinda a special case, while assigning versioned expressions to a
+          // Factor we cannot infer that a variable or a constant is coming
+          // from the predecessor and we assign it to ⊥, but a Linked Factor
+          // will know for sure whether a constant/variable is involved.
+          if (IsVariableOrConstant(PV) &&
+              (IsBottom(FVE) || FactorExpression::classof(FVE)))
+            continue;
+
+          // Continuing from the previous check, if one the operands is a const
+          // variable or bottom we skip further comparing because it is clearly
+          // a mismatch
+          if (IsVariableOrConstant(PV) || IsBottom(FVE)) {
+            Skip = true;
+            break;
+          }
+
+          // NOTE
+          // Yet another special case, since we do not add same version on the
+          // stack it is possible to have a Factor as an operand of itself,
+          // this happens for back branches only. We treat such an operand as a
+          // bottom and ignore it.
+          if (FVE == F) continue;
+
+          auto PIVE = ValueToExp[PV];
+          if (PIVE && (FVE == PIVE || FVE->getVersion() == PIVE->getVersion()))
+            continue;
+
+          Kill = false;
           break;
         }
-      }
 
-      if (Same) {
-        FactorKillList.insert(F);
+        if (Skip) continue;
+        if (Kill) {
+          FactorKillList.insert(F);
+          break;
+        }
       }
     }
   }
 
-
   for (auto F : FactorKillList) {
-    if (auto P = F->getProto()) {
-      P->dropAllReferences();
-    }
-
-    auto PHI = FactorToPHI[F];
+    if (auto P = F->getProto()) P->dropAllReferences();
     KillFactor(F);
-    AddSubstitution(F, PHI ? InstToVExpr[PHI] : GetTop());
+    AddSubstitution(F, GetTop());
   }
 }
 
@@ -2059,17 +2082,17 @@ RenameInductivityPass() {
         AddSubstitution(VE, VE);
 
         // Find all the Factors within the loop that share the same PE
-        // auto HDFS = InstrDFS[&H->front()];
-        // auto IDFS = InstrDFS[VExprToInst[VE]];
+        auto HDFS = InstrDFS[&H->front()];
+        auto IDFS = InstrDFS[VExprToInst[VE]];
         for (auto IF : FExprs) {
           if (IF->getPExpr() != PE) continue;
-          // auto IFB = FactorToBlock[IF];
+          auto IFB = FactorToBlock[IF];
 
           // This checks whether this Factor is within the cycle by assurring
           // its containing block's dfs is between header block's and induction
           // instruction's
-          // auto DFS = InstrDFS[&IFB->front()];
-          // if (DFS < HDFS || DFS > IDFS) continue;
+          auto DFS = InstrDFS[&IFB->front()];
+          if (DFS < HDFS || DFS > IDFS) continue;
 
           FactorKillList.insert(IF);
         }
@@ -2451,22 +2474,20 @@ FactorGraphWalkBottomUp() {
 
         if (ShouldStay ||
 
+            // N.B.
+            // This is where profiling would be useful, we can prove whether
+            // operands in these expressions dominate the factored phi and move
+            // them up the cycle, thus precomputing the values, but here we act
+            // conservatively and leave the expressions inside the cycle since
+            // we do not know if we ever enter it
+
             // An incoming non-cycled expression that is not a real expression
             // forces this one to stay; this is a conservative approach but
             // with profiling this can change
-            ((FactorExpression::classof(VE) || IsBottomOrVarOrConst(VE)) &&
-
-             // And it must be a real phi and also has real uses
-             FE->getIsMaterialized() && FactorToPHI[FE]->getNumUses() != 0)) {
+            ((FactorExpression::classof(VE) || IsBottomOrVarOrConst(VE)))) {
 
           // By this time these cycled expression will point to the Factor, but
           // since it stays we these expressions must stay as well.
-          //
-          // N.B.  This is where profiling would be useful, we can prove
-          // whether operands in these expressions dominate the factored phi
-          // and move them up the cycle, thus precomputing the values, but here
-          // we act conservatively and leave the expressions inside the cycle
-          // since we do not know if we ever enter it
           for (auto CE : CEV)  AddSubstitution(CE, CE, /* direct */ true);
           continue; // no further processing
         }
