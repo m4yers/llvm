@@ -381,6 +381,7 @@ AddSubstitution(Expression *E, Expression *S, bool Direct, bool Force) {
       IsTop(S)) &&
       "Substituting expression must be of the same Proto or Top or Bottom");
 
+
   auto *PE = ExprToPExpr[E];
   if (!PE) PE = E;
 
@@ -411,6 +412,7 @@ AddSubstitution(Expression *E, Expression *S, bool Direct, bool Force) {
     S->addSave();
   }
 
+  assert(S);
   MA[E] = S;
 }
 
@@ -433,7 +435,7 @@ GetSubstitution(Expression *E, bool Direct) {
     return E;
   }
 
-  while (auto EE = MA[E]) {
+  while (auto EE = GetSubstitution(E, true)) {
     assert(EE && "Must not be null");
     if (IsBottom(EE) || IsTop(EE)) return EE;
     if (E == EE) return E;
@@ -2347,9 +2349,6 @@ Finalize() {
       auto VE = InstToVExpr[&I];
       auto PE = ExprToPExpr[VE];
 
-      // Linked PHI nodes are ignored, their Factors are processed separately
-      // if (IsFactoredPHI(&I)) continue;
-
       // Traverse operands and add Save count to theirs definitions
       for (auto &O : I.operands()) {
         if (auto &E = ValueToExp[O]) {
@@ -2364,7 +2363,16 @@ Finalize() {
       // be records that bind an expression with a non available in any way
       // factor. This does not (or at least should not) break anything achieved
       // in rename since cycled operands considered available.
+
       AddSubstitution(VE, VE);
+      if (auto PHI = dyn_cast<PHINode>(&I)) {
+        if (PHI->getNumOperands() == 1) {
+          auto PHIO = PHI->getIncomingValue(0);
+          auto PHIOVE = ValueToExp[PHIO];
+          assert(PHIOVE);
+          AddSubstitution(VE, PHIOVE, /* direct */ true, /* force */ true);
+        }
+      }
 
       auto V = VE->getVersion();
       auto &ADPE = AvailDef[PE];
@@ -2990,6 +2998,8 @@ PrintDebugSubstitutions() {
       dbgs() << " -> ";
       if (VE == SE) {
         dbgs() << "-";
+      } else if (!SE) {
+        dbgs() << "null -- SHOULD NOT BE LIKE THAT";
       } else if (IsTop(SE)) {
         dbgs() << "⊤";
       } else if (IsBottom(SE)) {
