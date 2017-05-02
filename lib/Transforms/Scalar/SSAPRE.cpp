@@ -1157,7 +1157,7 @@ public:
   GetTokenFor(const PHINode *PHI) {
     if (HasFactorFor(PHI))
       return PHITokenMap[PHI];
-    return GetBotTok();
+    return GetBottom();
   }
 
   bool
@@ -1198,9 +1198,7 @@ public:
     PHITokenMap[PHI] = T;
 
     // Either Top or Bottom results in deletion of the Factor
-    if (IsTopOrBottomTok(T)) {
-      SrcKillMap[PHI] = true;
-    }
+    SrcKillMap[PHI] = IsTopOrBottomTok(T);
 
     if (!SrcPropMap.count(PHI)) return;
 
@@ -1221,7 +1219,9 @@ public:
         DEBUG(dbgs() << "\n");
         DEBUG(P.getFirst()->print(dbgs()));
         O.ExpressionAllocator.Deallocate(P.getFirst());
-        PHIFactorMap.erase(P.getFirst());
+        auto PHI = P.getFirst();
+        PHIFactorMap.erase(PHI);
+        PHITokenMap.erase(PHI);
       }
     }
     DEBUG(dbgs() << "\n---------------------------\n");
@@ -1239,6 +1239,8 @@ public:
         auto PHI = dyn_cast<PHINode>(&I);
         if (!PHI) continue;
 
+        auto PHIVE = O.ValueToExp[PHI];
+
         // Token is a meet of all the PHI's operands. We optimistically set it
         // initially to Top
         Token_t TOK = GetTopTok();
@@ -1253,6 +1255,19 @@ public:
           auto Op = PHI->getOperand(i);
           auto BB = PHI->getIncomingBlock(i);
           auto OVE = O.ValueToExp[Op];
+
+          // Can happen after other optimization passes
+          while (auto OPHI = dyn_cast<PHINode>(Op)) {
+            if (OPHI->getNumOperands() != 1) break;
+            Op = OPHI->getIncomingValue(0);
+            OVE = O.ValueToExp[Op];
+          }
+
+          // Self-loop gives an optimistic Top value
+          if (OVE == PHIVE) {
+            TOK = GetTopTok();
+            continue;
+          }
 
           // Ignored expressions produce Bottom value right away
           if (IgnoredExpression::classof(OVE) ||
@@ -1275,17 +1290,18 @@ public:
           }
 
           if (auto OPHI = dyn_cast<PHINode>(Op)) {
+
+            // This is a back-branch and the operand is not yet processed by
+            // this loop.  We will use a rolling Token that will provide us
+            // with a current value that we propagate upwards. Once we reached
+            // the top we will verify whether our assumption was correct. If it
+            // was, all the PHIs we have visited and are using the same Token
+            // will assume this Token as a PE of its operand.  The propagation
+            // process stops if we encounter that the rest of the operands are
+            // either Expression with the same PE or Constant or Variable or
+            // Nothing in this case it is a success; or we encounter Expression
+            // with different PE, this is a failure case.
             if (O.InstrDFS[Op] > O.InstrDFS[PHI]) {
-              // This is a back-branch and the operand is not yet processed by
-              // this loop.  We will use a rolling Token that will provide us
-              // with a current value that we propagate upwards. Once we reached
-              // the top we will verify whether our assumption was correct. If it
-              // was, all the PHIs we have visited and are using the same Token
-              // will assume this Token as a PE of its operand.  The propagation
-              // process stops if we encounter that the rest of the operands are
-              // either Expression with the same PE or Constant or Variable or
-              // Nothing in this case it is a success; or we encounter Expression
-              // with different PE, this is a failure case.
               TOK = CalculateToken(TOK, GetTopTok());
               assert(!BackBranch && "Must not be a second Back Branch");
               BackBranch = OPHI;
@@ -1340,7 +1356,15 @@ public:
         // This PHI has back branches and we are still not sure whether it is a
         // materialized Factor.
         if (BackBranch) {
+
+          // It is not a materialized Factor for sure
+          // if (IsBotTok(TOK)) break;
+
+          // Now we have either an Expression or Top value to propagate
+          // upwards. We get/create Factors for current PHI and its cycle PHI
+          // operands and link them appropriately.
           AddPropagation(TOK, BackBranch, PHI);
+
         } else {
           FinishPropagation(TOK, PHI);
         }
