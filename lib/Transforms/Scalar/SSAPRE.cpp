@@ -2031,6 +2031,13 @@ RenameCleaup() {
               (IsBottom(FVE) || FactorExpression::classof(FVE)))
             continue;
 
+          // This happens when the PHI is not getting its Factor during factor-
+          // insertion step due to Bottom token evaluation.
+          if (auto PHIPV = dyn_cast<PHINode>(PV)) {
+            auto TOK = TokSolver.GetTokenFor(PHIPV);
+            if (IsBottom(TOK) && IsBottom(FVE)) continue;
+          }
+
           // Continuing from the previous check, if one the operands is a const
           // variable or bottom we skip further comparing because it is clearly
           // a mismatch
@@ -3072,6 +3079,10 @@ runImpl(Function &F,
   AC = &_AC;
   DT = &_DT;
   Func = &F;
+
+  if (F.getName().contains("first_assignments")) {
+    dbgs() << "HERE";
+  }
 
   NumFuncArgs = F.arg_size();
 
