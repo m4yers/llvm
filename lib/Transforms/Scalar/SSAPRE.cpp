@@ -640,7 +640,7 @@ ReplaceFactorMaterialized(FactorExpression * FE, Expression * VE,
     auto UI = (Instruction *)U;
     auto UE  = InstToVExpr[UI];
 
-    // Skip istructions without parents, unless they are to be inserted
+    // Skip instruction without parents, unless they are to be inserted
     if (!UI->getParent()) continue;
 
     if (IsTopOrBot && !IsToBeKilled (UI) && !FactorExpression::classof(UE)) {
@@ -652,8 +652,8 @@ ReplaceFactorMaterialized(FactorExpression * FE, Expression * VE,
   }
 
   // Replace all PHI uses with a real instruction result only
-  if (!IsTopOrBot) {
-    // ??? can we delay it till the substitution
+  if (!IsTopOrBot &&
+      !(FactorExpression::classof(VE) && !FactorToPHI[(FactorExpression*)VE])) {
     auto V = (Value *)ExpToValue[VE];
     PHI->replaceAllUsesWith(V);
     SSAPREInstrSubstituted++;
@@ -2399,8 +2399,15 @@ FactorCleanup(FactorExpression * F) {
 
   // If all the ops are the same just use it
   if (Same) {
-    ReplaceFactor(F, O, HRU);
-    return true;
+    // If the Factor is materialized we need to delay its replacement till
+    // the substitution step
+    if (F->getIsMaterialized()) {
+      AddSubstitution(F, O);
+      return false;
+    } else {
+      ReplaceFactor(F, O, HRU);
+      return true;
+    }
   }
 
   // We need to check whether all the arguments still present, if we
@@ -2493,6 +2500,10 @@ FactorGraphWalkBottomUp() {
 
         if (ShouldStay ||
 
+            // An incoming non-cycled expression that is not a real expression
+            // forces this one to stay;
+            IsVariableOrConstant(VE) ||
+
             // N.B.
             // This is where profiling would be useful, we can prove whether
             // operands in these expressions dominate the factored phi and move
@@ -2500,10 +2511,10 @@ FactorGraphWalkBottomUp() {
             // conservatively and leave the expressions inside the cycle since
             // we do not know if we ever enter it
 
-            // An incoming non-cycled expression that is not a real expression
-            // forces this one to stay; this is a conservative approach but
-            // with profiling this can change
-            ((FactorExpression::classof(VE) || IsBottomOrVarOrConst(VE)))) {
+            // If there are more than one successors to the loop head we stay,
+            // this is a conservative approach but with profiling this can
+            // change
+            (IsBottom(VE) && B->getTerminator()->getNumSuccessors() > 1)) {
 
           // By this time these cycled expression will point to the Factor, but
           // since it stays we these expressions must stay as well.
@@ -2517,7 +2528,10 @@ FactorGraphWalkBottomUp() {
           continue; // no further processing
         }
 
+        // TODO If there is no use of the expression inside the cycle move it
+        // TODO to its successors
         auto T = PB->getTerminator();
+
         // Make sure the operands available at the predecessor block end
         if (!OperandsDominateStrictly(PE->getProto(), InstToVExpr[T])) continue;
 
@@ -2711,7 +2725,7 @@ ApplySubstitutions() {
 
     if (IsBottom(VE)) continue;
     if (IgnoreExpression(VE)) continue;
-    if (IsToBeKilled(VE)) continue;
+    // if (IsToBeKilled(VE)) continue;
 
     auto VI = VExprToInst[VE];
     auto SE = GetSubstitution(VE);
@@ -3059,6 +3073,10 @@ runImpl(Function &F,
   AC = &_AC;
   DT = &_DT;
   Func = &F;
+
+  if (F.getName().contains("MultiplyInternalFPF")) {
+    dbgs() << "HERE";
+  }
 
   NumFuncArgs = F.arg_size();
 
