@@ -1564,7 +1564,7 @@ Fini() {
 }
 
 void SSAPRE::
-FactorInsertion() {
+FactorInsertionMaterialized() {
   using namespace phi_factoring;
   TokenPropagationSolver TokSolver(TPST_Accurate, *this);
   TokSolver.Solve();
@@ -1608,7 +1608,10 @@ FactorInsertion() {
     AddFactor(F, T, B);
     MaterializeFactor(F, (PHINode *)PHI);
   }
+}
 
+void SSAPRE::
+FactorInsertionRegular() {
   // Insert Factors for every PE
   // Factors are inserted in two cases:
   //   - for each block in expressions IDF
@@ -1629,45 +1632,6 @@ FactorInsertion() {
     IDFs.calculate(IDF);
 
     for (const auto &B : IDF) {
-      // We only need to insert a Factor at a merge point when it reaches a
-      // later occurance(a DEF at this point) of the expression. A later
-      // occurance will have a bigger DFS number;
-
-      // SHIT remove cycles
-      // NOTE Supressing Factor addition will limit DS propagation with cycles
-      // NOTE It won't have uses anyway and we will delete it in the end
-      // bool ShouldInsert = false;
-      // SmallVector<BasicBlock *, 32> Queue;
-      // DenseMap<BasicBlock *, bool> Visited;
-      // Queue.push_back(B);
-      // while (!Queue.empty()) {
-      //   auto BB = Queue.pop_back_val();
-      //
-      //   if (Visited.count(BB)) continue;
-      //
-      //   for (auto &I : *BB) {
-      //     auto OE = ValueToExp[&I];
-      //     auto OPE = ExprToPExpr[OE];
-      //
-      //     // If Proto of the occurance matches the PE we should insert here
-      //     if (OPE == PE) {
-      //       ShouldInsert = true;
-      //       break;
-      //     }
-      //   }
-      //
-      //   if (ShouldInsert) break;
-      //
-      //   Visited[BB] = true;
-      //
-      //   // Continue with the successors if none found
-      //   for (auto S : BB->getTerminator()->successors()) {
-      //     Queue.push_back(S);
-      //   }
-      // }
-
-      // If we do not insert just continue
-      // if (!ShouldInsert) continue;
 
       // True if a Factor for this Expression with exactly the same arguments
       // exists. There are two possibilities for arguments equality, there
@@ -1675,11 +1639,17 @@ FactorInsertion() {
       // versions(or rather expression definitions) which means they were
       // spawned out of PHIs. We are concern with the first case for now.
       bool FactorExists = false;
-      // FIXME remove the cycle
       for (auto F : BlockToFactors[B]) {
-        if (!F->getIsMaterialized() && F->getPExpr() == PE) {
-          FactorExists = true;
-          break;
+        if (F->getPExpr() == PE) {
+          if (F->getIsMaterialized()) {
+            // TODO Is there a way not to do the rename.cleanup and reject
+            // TODO factor insertion here. The reason why this requires a
+            // TODO separate pass is that we do not know the actual operands
+            // TODO before we run rename
+          } else {
+            FactorExists = true;
+            break;
+          }
         }
       }
 
@@ -1693,6 +1663,15 @@ FactorInsertion() {
     // Once operands phi-ud graphs are ready we need to traverse them to insert
     // Factors at each operands' phi definition as in paper.
   }
+}
+
+void SSAPRE::
+FactorInsertion() {
+  FactorInsertionMaterialized();
+  DEBUG(PrintDebug("STEP 1: F-Insertion.Materialized"));
+
+  FactorInsertionRegular();
+  DEBUG(PrintDebug("STEP 1: F-Insertion.Regular"));
 }
 
 void SSAPRE::
@@ -3086,10 +3065,8 @@ runImpl(Function &F,
   DEBUG(F.dump());
 
   Init(F);
-  DEBUG(PrintDebug("STEP 0: Init"));
 
   FactorInsertion();
-  DEBUG(PrintDebug("STEP 1: F-Insertion"));
 
   Rename();
 

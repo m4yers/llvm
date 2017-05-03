@@ -809,6 +809,8 @@ private:
   void Init(Function &F);
   void Fini();
 
+  void FactorInsertionMaterialized();
+  void FactorInsertionRegular();
   void FactorInsertion();
 
   void RenamePass();
