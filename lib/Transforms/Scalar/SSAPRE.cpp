@@ -1589,7 +1589,11 @@ FactorInsertionMaterialized() {
       auto B = PHI->getIncomingBlock(i);
       auto O = PHI->getOperand(i);
 
-      assert(!F->getVExpr(B) && "This is the switch case i was affraid of");
+      // This is a switch, it better have the same value along several branches
+      if (auto OO = F->getVExpr(B)) {
+        if (OO != ValueToExp[O])
+          llvm_unreachable("This is the switch case i was affraid of");
+      }
 
       if (auto OPHI = dyn_cast<PHINode>(O)) {
 
@@ -2514,7 +2518,8 @@ FactorGraphWalkBottomUp() {
             // If there are more than one successors to the loop head we stay,
             // this is a conservative approach but with profiling this can
             // change
-            (IsBottom(VE) && B->getTerminator()->getNumSuccessors() > 1)) {
+            ((FactorExpression::classof(VE) || IsBottom(VE)) &&
+             B->getTerminator()->getNumSuccessors() > 1)) {
 
           // By this time these cycled expression will point to the Factor, but
           // since it stays we these expressions must stay as well.
