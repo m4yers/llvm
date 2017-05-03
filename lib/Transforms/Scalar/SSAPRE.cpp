@@ -2013,7 +2013,9 @@ RenameCleaup() {
         if (PHI->getNumOperands() != F->getVExprNum()) continue;
 
         auto PF = TokSolver.GetTokenFor(PHI);
-        if (PF != F->getPExpr()) continue;
+        // The Solver can give Bottom for PHI in case its Factor was kill
+        // during its pass
+        if (!IsBottom(PF) && PF != F->getPExpr()) continue;
 
         bool Skip = false;
         bool Kill = true;
@@ -2027,16 +2029,9 @@ RenameCleaup() {
           // Factor we cannot infer that a variable or a constant is coming
           // from the predecessor and we assign it to ⊥, but a Linked Factor
           // will know for sure whether a constant/variable is involved.
-          if (IsVariableOrConstant(PV) &&
+          if ((IsVariableOrConstant(PV) || PHINode::classof(PV)) &&
               (IsBottom(FVE) || FactorExpression::classof(FVE)))
             continue;
-
-          // This happens when the PHI is not getting its Factor during factor-
-          // insertion step due to Bottom token evaluation.
-          if (auto PHIPV = dyn_cast<PHINode>(PV)) {
-            auto TOK = TokSolver.GetTokenFor(PHIPV);
-            if (IsBottom(TOK) && IsBottom(FVE)) continue;
-          }
 
           // Continuing from the previous check, if one the operands is a const
           // variable or bottom we skip further comparing because it is clearly
@@ -3091,6 +3086,7 @@ runImpl(Function &F,
   DEBUG(F.dump());
 
   Init(F);
+  DEBUG(PrintDebug("STEP 0: Init"));
 
   FactorInsertion();
   DEBUG(PrintDebug("STEP 1: F-Insertion"));
