@@ -1185,6 +1185,8 @@ public:
     if (!HasFactorFor(S)) CreateFactor(S, T);
     if (!HasFactorFor(D)) CreateFactor(D, T);
 
+    SrcKillMap[D] = IsBotTok(T);
+
     if (!SrcPropMap.count(S)) {
       SrcPropMap.insert({S, {{T, D}}});
     } else {
@@ -1359,13 +1361,17 @@ public:
         // materialized Factor.
         if (BackBranch) {
 
-          // It is not a materialized Factor for sure
-          // if (IsBotTok(TOK)) break;
+          // Even with the back branch if the TOK is bottom it won't change and
+          // we can finish its "propagation" right now
+          if (IsBotTok(TOK)) {
+            FinishPropagation(TOK, PHI);
 
-          // Now we have either an Expression or Top value to propagate
+          // Or we have either an Expression or Top value to propagate
           // upwards. We get/create Factors for current PHI and its cycle PHI
           // operands and link them appropriately.
-          AddPropagation(TOK, BackBranch, PHI);
+          } else {
+            AddPropagation(TOK, BackBranch, PHI);
+          }
 
         } else {
           FinishPropagation(TOK, PHI);
@@ -3053,10 +3059,6 @@ runImpl(Function &F,
   AC = &_AC;
   DT = &_DT;
   Func = &F;
-
-  if (F.getName().contains("first_assignments")) {
-    dbgs() << "HERE";
-  }
 
   NumFuncArgs = F.arg_size();
 
