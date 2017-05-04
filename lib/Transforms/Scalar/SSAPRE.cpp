@@ -2502,11 +2502,14 @@ FactorGraphWalkBottomUp() {
           VE = V;
         }
 
+        // NOTE These peredicates force aggressive cycle hoisting
         if (ShouldStay ||
+
+            IsVariableOrConstant(VE) || FactorExpression::classof(VE)) {
 
             // An incoming non-cycled expression that is not a real expression
             // forces this one to stay;
-            IsVariableOrConstant(VE) ||
+            // IsVariableOrConstant(VE) ||
 
             // N.B.
             // This is where profiling would be useful, we can prove whether
@@ -2518,8 +2521,8 @@ FactorGraphWalkBottomUp() {
             // If there are more than one successors to the loop head we stay,
             // this is a conservative approach but with profiling this can
             // change
-            ((FactorExpression::classof(VE) || IsBottom(VE)) &&
-             B->getTerminator()->getNumSuccessors() > 1)) {
+            // ((FactorExpression::classof(VE) || IsBottom(VE)) &&
+            //  B->getTerminator()->getNumSuccessors() > 1)) {
 
           // By this time these cycled expression will point to the Factor, but
           // since it stays we these expressions must stay as well.
@@ -3078,10 +3081,6 @@ runImpl(Function &F,
   AC = &_AC;
   DT = &_DT;
   Func = &F;
-
-  if (F.getName().contains("MultiplyInternalFPF")) {
-    dbgs() << "HERE";
-  }
 
   NumFuncArgs = F.arg_size();
 
