@@ -1060,10 +1060,10 @@ namespace ssapre {
 namespace phi_factoring {
 typedef const Expression * Token_t;
 
-// This structure encode an assumption that a SRC PHI is an operand of DST
-// PHI, the second operand of which is TOK.
 struct PropDst_t {
+  // Token know thus far
   Token_t TOK;
+  // Destination that expects a new Token that is coalculate using TOK
   const PHINode * DST;
 
   PropDst_t() = delete;
@@ -1114,7 +1114,7 @@ typedef DenseMap<const PHINode *, const FactorExpression *> PHIFactorMap_t;
 typedef DenseMap<const PHINode *, Token_t> PHITokenMap_t;
 typedef SmallVector<PropDst_t, 8> PropDstVector_t;
 typedef DenseMap<const PHINode *, PropDstVector_t> SrcPropMap_t;
-typedef DenseMap<const PHINode *, bool> SrcKillMap_t;
+typedef DenseMap<const PHINode *, bool> PHIBoolMap_t;
 typedef SmallVector<const PHINode *, 8> PHIVector_t;
 
 enum TokenPropagationSolverType {
@@ -1133,7 +1133,8 @@ class TokenPropagationSolver {
   PHIFactorMap_t PHIFactorMap;
   PHITokenMap_t PHITokenMap;
   SrcPropMap_t SrcPropMap;
-  SrcKillMap_t SrcKillMap;
+  PHIBoolMap_t SrcKillMap;
+  PHIBoolMap_t FinishedMap;
 
 public:
   TokenPropagationSolver() = delete;
@@ -1143,10 +1144,11 @@ public:
   void
   CreateFactor(const PHINode *PHI, Token_t PE) {
     auto E = PHIFactorMap[PHI];
-    assert(!E && "FE already exist");
+    assert(!E && "FE already exists");
     E = O.CreateFactorExpression(*PE, *PHI->getParent());
     PHIFactorMap[PHI] = E;
     SrcKillMap[PHI] = false;
+    FinishedMap[PHI] = false;
   }
 
   bool
@@ -1164,6 +1166,12 @@ public:
   bool
   HasFactorFor(const PHINode *PHI) {
     return PHIFactorMap.count(PHI) != 0;
+  }
+
+  bool
+  IsFinished(const PHINode *PHI) {
+    assert(HasFactorFor(PHI));
+    return FinishedMap[PHI];
   }
 
   const FactorExpression *
@@ -1203,6 +1211,8 @@ public:
     // Either Top or Bottom results in deletion of the Factor
     SrcKillMap[PHI] = IsTopOrBottomTok(T);
 
+    FinishedMap[PHI] = true;
+
     if (!SrcPropMap.count(PHI)) return;
 
     // Recursively finish every propagation
@@ -1216,18 +1226,25 @@ public:
   Cleanup() {
     // Erase all killed Factors before returning the Map
     for (auto P : SrcKillMap) {
-      if (P.getSecond()) {
-        O.ExpressionAllocator.Deallocate(P.getFirst());
-        auto PHI = P.getFirst();
-        PHIFactorMap.erase(PHI);
-        PHITokenMap.erase(PHI);
-      }
+      if (!P.getSecond()) continue;
+
+      O.ExpressionAllocator.Deallocate(P.getFirst());
+      auto PHI = P.getFirst();
+      PHIFactorMap.erase(PHI);
+      PHITokenMap.erase(PHI);
     }
   }
 
   void
   Solve() {
-    // We examine in each join block first to find already "materialized" Factors
+    // Top-Down walk over join blocks set and try to calculate current PHIs PE.
+    // If it happens that some operand of this PHI is produced by another PHI
+    // that we yet to meet(back branch) we create a propagation record that
+    // stores partial Token and these two PHIs as Source and Destination. If we
+    // can calculate a Token immediately we "finish" current PHI and propagate
+    // its Token to other PHIs that depend on it recursively. By the end of
+    // this walk we will have a set of Factors that have either a legal Token
+    // or a Bottom value as their Prototype Expression.
     for (auto B : O.JoinBlocks) {
       for (auto &I : *B) {
 
@@ -1289,50 +1306,33 @@ public:
 
           if (auto OPHI = dyn_cast<PHINode>(Op)) {
 
-            // This is a back-branch and the operand is not yet processed by
-            // this loop.  We will use a rolling Token that will provide us
-            // with a current value that we propagate upwards. Once we reached
-            // the top we will verify whether our assumption was correct. If it
-            // was, all the PHIs we have visited and are using the same Token
-            // will assume this Token as a PE of its operand.  The propagation
-            // process stops if we encounter that the rest of the operands are
-            // either Expression with the same PE or Constant or Variable or
-            // Nothing in this case it is a success; or we encounter Expression
-            // with different PE, this is a failure case.
-            if (O.InstrDFS[Op] > O.InstrDFS[PHI]) {
+            if (!HasFactorFor(OPHI)) {
               TOK = CalculateToken(TOK, GetTopTok());
+
+              // It is more like a sane precaution during development phase;
+              // the solver can be changed to handle multiple back-branches,
+              // but I have yet to encounter a block that has more than one and
+              // thus this "feature" is not implemented
               assert(!BackBranch && "Must not be a second Back Branch");
               BackBranch = OPHI;
-              continue;
-            }
 
-            // If the User is a PHI and it is linked to a Factor already, this
-            // means this PHI/Factor joins expressions of the same type
-            if (auto FOVE = O.PHIToFactor[OPHI]) {
-              TOK = CalculateToken(TOK, FOVE->getPExpr());
-
-              // Another back-branched PHI
-            } else if (HasFactorFor(OPHI)) {
-              // If we already know the Token for this PHI, use it, otherwise it
-              // is Bottom
-              Token_t T = HasTokenFor(OPHI)
-                ? GetTokenFor(OPHI)
-                : GetTopTok();
-              TOK = CalculateToken(TOK, T);
-
-              // Otherwise it is Bottom
             } else {
-              TOK = CalculateToken(TOK, GetBotTok());
+              Token_t T = IsFinished(OPHI) ? GetTokenFor(OPHI) : GetTopTok();
+              TOK = CalculateToken(TOK, T);
             }
+
             continue;
+
             // Otherwise we use whatever this VE is prototyped by
           } else {
             TOK = CalculateToken(TOK, O.ExprToPExpr[OVE]);
             NonBottomArgs.insert(OVE);
+
             continue;
           }
         }
 
+        // TODO explain this
         // If there any bottom arguments we need to verify that all other
         // argument expressions' arguments dominate this bottom's origin basic
         // block
@@ -1364,7 +1364,7 @@ public:
           // upwards. We get/create Factors for current PHI and its cycle PHI
           // operands and link them appropriately.
           } else {
-            AddPropagation(TOK, BackBranch, PHI);
+            AddPropagation(TOK, /* Source */ BackBranch, /* Destination */ PHI);
           }
 
         } else {
