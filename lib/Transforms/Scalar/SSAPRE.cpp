@@ -6,6 +6,11 @@
 // License. See LICENSE.TXT for details.
 //
 //===----------------------------------------------------------------------===//
+//
+// The pass is based on paper "A new algorithm for partial redundancy
+// elimination based on SSA form" by Fred Chow, Sun Chan, Robert Kennedy
+// Shin-Ming Liu, Raymond Lo and Peng Tu.
+//
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Scalar/SSAPRE.h"
@@ -73,7 +78,6 @@ IsVersionUnset(const Expression *E) {
   return E->getVersion() == VR_Unset;
 }
 
-// This is used as ⊥ version
 static Expression TExpr(ET_Top,    ~2U, VR_Top);
 static Expression BExpr(ET_Bottom, ~2U, VR_Bottom);
 static Expression * GetTop()    { return &TExpr; }
@@ -98,7 +102,7 @@ IsBottomOrVarOrConst(const Expression *E) {
 }
 
 ExpVector_t & SSAPRE::
-GetFactorVersions(const FactorExpression *F) {
+GetSameVExpr(const FactorExpression *F) {
   assert(F && !IsBottomOrVarOrConst(F));
   auto PE = F->getPExpr();
   assert(PE && !IsBottomOrVarOrConst(PE));
@@ -106,7 +110,7 @@ GetFactorVersions(const FactorExpression *F) {
 }
 
 ExpVector_t & SSAPRE::
-GetExpVersions(const Expression *E) {
+GetSameVExpr(const Expression *E) {
   assert(E && !IsBottom(E));
   auto PE = ExprToPExpr[E];
   assert(PE && !IsBottom(PE));
@@ -243,7 +247,9 @@ bool SSAPRE::
 HasRealUseBefore(const Expression *S, const BBVector_t &P,
                  const Expression *E) {
   auto EDFS = InstrDFS[VExprToInst[E]];
-  for (auto V : GetExpVersions(S)) {
+
+  // We need to check every expression that shares the same version
+  for (auto V : GetSameVExpr(S)) {
     for (auto U : VExprToInst[V]->users()) {
       auto UI = (Instruction *)U;
 
@@ -286,7 +292,7 @@ FactorHasRealUseBefore(const FactorExpression *F, const BBVector_t &P,
 
   // We check every Expression of the same version as the Factor we check,
   // since by definition those will come after the Factor
-  for (auto V : GetFactorVersions(F)) {
+  for (auto V : GetSameVExpr(F)) {
     for (auto U : VExprToInst[V]->users()) {
       auto UI = (Instruction *)U;
 
@@ -349,8 +355,7 @@ AllUsersKilled(const Instruction *I) {
         }
       }
 
-      if (!Killed)
-        return false;
+      if (!Killed) return false;
     }
   }
   return true;
@@ -403,7 +408,6 @@ AddSubstitution(Expression *E, Expression *S, bool Direct, bool Force) {
     if (auto SS = GetSubstitution(S)) S = SS;
   }
 
-  // If this is a new Substitution add a Save
   if (
       // Any F -> E substitution serves as a jump record
       !FactorExpression::classof(E) &&
@@ -425,7 +429,7 @@ GetSubstitution(Expression *E, bool Direct) {
   auto PE = ExprToPExpr[E];
   if (!PE) PE = E;
   if (!Substitutions.count(PE)) {
-    llvm_unreachable("well..");
+    llvm_unreachable("This type of expressions does not exist in the record");
   }
   auto &MA = Substitutions[PE];
 
@@ -436,7 +440,7 @@ GetSubstitution(Expression *E, bool Direct) {
   }
 
   while (auto EE = GetSubstitution(E, true)) {
-    assert(EE && "Must not be null");
+    assert(EE && "Substitution cannot be null");
     if (IsBottom(EE) || IsTop(EE)) return EE;
     if (E == EE) return E;
     E = EE;
@@ -458,13 +462,14 @@ RemSubstitution(Expression *E) {
 
 Value * SSAPRE::
 GetSubstituteValue(Expression *E) {
+  E = GetSubstitution(E);
   if (auto F = dyn_cast<FactorExpression>(E)) {
     if (F->getIsMaterialized())
       return (Value *)FactorToPHI[F];
     else
       llvm_unreachable("Must not have happened");
   }
-  return (Value *)ExpToValue[GetSubstitution(E)];
+  return (Value *)ExpToValue[E];
 }
 
 void SSAPRE::
@@ -528,14 +533,12 @@ KillFactor(FactorExpression *F, bool BottomSubstitute) {
   assert(F);
 
   // Must be the first
-  if (BottomSubstitute)
-    AddSubstitution(F, GetBottom());
+  if (BottomSubstitute) AddSubstitution(F, GetBottom());
 
   auto &B = FactorToBlock[F];
   auto &V = BlockToFactors[B];
   for (auto VS = V.begin(), VV = V.end(); VS != VV; ++VS) {
-    if (*VS == F)
-      V.erase(VS);
+    if (*VS == F) V.erase(VS);
   }
 
   FactorToBlock.erase(F);
@@ -553,8 +556,6 @@ KillFactor(FactorExpression *F, bool BottomSubstitute) {
     // Replace the FactorExpression with a regular PHIExpression
     auto E = CreateExpression(*PHI);
     auto P = CreateExpression(*PHI);
-    // NOTE we use the PE
-    // AddExpression((Expression *)F->getPExpr(), E, PHI, PHI->getParent());
     AddExpression(P, E, PHI, PHI->getParent());
   }
 }
@@ -568,6 +569,7 @@ MaterializeFactor(FactorExpression *FE, PHINode *PHI) {
   // These may not exist if we just materialized the phi
   auto PVE = InstToVExpr[PHI];
   auto PPE = ExprToPExpr[PVE];
+
   if (PPE) {
     // We need to remove anything related to this PHIs original prototype,
     // because before we verified that this PHI is actually a Factor it was based
@@ -627,8 +629,7 @@ ReplaceFactorMaterialized(FactorExpression * FE, Expression * VE,
   assert(FE && VE);
 
   // We want the most recent expression
-  if (!Direct)
-    VE = GetSubstitution(VE);
+  if (!Direct) VE = GetSubstitution(VE);
 
   bool IsTopOrBot = IsTop(VE) || IsBottom(VE);
 
@@ -710,7 +711,7 @@ ReplaceFactorFinalize(FactorExpression *FE, Expression *VE,
   // by definition, since we replace the factor with another Expression we can
   // remove all other expressions of the same version and replace their usage
   // with this new one.
-  for (auto V : GetFactorVersions(FE)) {
+  for (auto V : GetSameVExpr(FE)) {
     AddSubstitution(V, VE, Direct);
   }
 
