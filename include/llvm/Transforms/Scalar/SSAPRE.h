@@ -682,11 +682,11 @@ private:
 
   // Return a reference to the vector containing all Expressions that share
   // the same version with F, by definition those occur after the F
-  ExpVector_t & GetFactorVersions(const FactorExpression *F);
+  ExpVector_t & GetSameVExpr(const FactorExpression *F);
 
   // Return a reference to the vector containing all Expressions that share
   // the same version with E, these versions may occur before or after E
-  ExpVector_t & GetExpVersions(const Expression *E);
+  ExpVector_t & GetSameVExpr(const Expression *E);
 
   // Check whether an Expression is a ⊥ value. It can be not only a real bottom
   // value but a constant or a variable since they do not provide a computation

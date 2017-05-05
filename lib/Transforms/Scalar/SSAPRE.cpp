@@ -641,7 +641,7 @@ ReplaceFactorMaterialized(FactorExpression * FE, Expression * VE,
     auto UI = (Instruction *)U;
     auto UE  = InstToVExpr[UI];
 
-    // Skip instruction without parents, unless they are to be inserted
+    // Skip instruction without parents
     if (!UI->getParent()) continue;
 
     if (IsTopOrBot && !IsToBeKilled (UI) && !FactorExpression::classof(UE)) {
@@ -664,8 +664,6 @@ ReplaceFactorMaterialized(FactorExpression * FE, Expression * VE,
   PHIToFactor[PHI] = nullptr;
   FactorToPHI[FE] = nullptr;
 
-  // Push this PHI into the kill-list, its operands won't be processed during
-  // kill time, since it is/was a factored expression
   KillList.push_back(PHI);
 
   // The rest is the same as for non-materialized Factor
@@ -717,8 +715,7 @@ ReplaceFactorFinalize(FactorExpression *FE, Expression *VE,
 
   // If we replace the Factor with a newly created expression we need to assign
   // it a version, killed factor's is fine i think.
-  if (IsVersionUnset(VE))
-    VE->setVersion(FE->getVersion());
+  if (IsVersionUnset(VE)) VE->setVersion(FE->getVersion());
 
   KillFactor(FE, false);
 
@@ -964,9 +961,11 @@ CreateFactorExpression(const Expression &PE, const BasicBlock &B) {
   for (auto S = pred_begin(&B), EE = pred_end(&B); S != EE; ++S) {
     auto PB = (BasicBlock *)*S;
     FE->addPred(PB, FE->getVExprNum());
+
     // Make sure this block is reachable and make bugpoint happy
     if (!ValueToExp[PB->getTerminator()]) FE->setVExpr(PB, GetBottom());
   }
+
   FE->setPExpr(&PE);
   ExprToPExpr[FE] = &PE;
 
@@ -1046,8 +1045,7 @@ CreateExpression(Instruction &I) {
     E = CreateUnknownExpression(I);
   }
 
-  if (!E)
-    E = CreateUnknownExpression(I);
+  if (!E) E = CreateUnknownExpression(I);
 
   return E;
 }
@@ -1217,19 +1215,14 @@ public:
   void
   Cleanup() {
     // Erase all killed Factors before returning the Map
-    DEBUG(dbgs() << "\n\nKilledNonLiveFactors");
-    DEBUG(dbgs() << "\n---------------------------");
     for (auto P : SrcKillMap) {
       if (P.getSecond()) {
-        DEBUG(dbgs() << "\n");
-        DEBUG(P.getFirst()->print(dbgs()));
         O.ExpressionAllocator.Deallocate(P.getFirst());
         auto PHI = P.getFirst();
         PHIFactorMap.erase(PHI);
         PHITokenMap.erase(PHI);
       }
     }
-    DEBUG(dbgs() << "\n---------------------------\n");
   }
 
   void
