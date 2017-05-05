@@ -108,11 +108,11 @@ define i64 @super_cycle_3(i64, i8**) #0 {
 }
 
 ; CHECK-LABEL: @super_cycle_4(
-; CHECK:       br
-; CHECK:       br
-; CHECK:       br
-; CHECK:       br
 ; CHECK:       add
+; CHECK:       br
+; CHECK:       br
+; CHECK:       br
+; CHECK:       br
 ; CHECK:       br
 ; CHECK:       br
 ; CHECK:       br
