@@ -5,3 +5,4 @@ TODO
  - Calls
  - Operand Versions?
  - Profiling
+ - More Benchmarks(SPEC for example)

@@ -1370,8 +1370,8 @@ Init(Function &F) {
 
   AddSubstitution(GetBottom(), GetBottom());
 
-  // Each block starts its count from N millions, this will allow us add
-  // instructions within wide DFS/SDFS range
+  // Each block starts its count from N hundred thousands, this will allow us
+  // add instructions within wide DFS/SDFS range
   unsigned ICountGrowth = 100000;
   unsigned ICount = ICountGrowth;
 
@@ -1435,7 +1435,8 @@ Init(Function &F) {
 
   // Now we need to create Reverse Sorted Dominator Tree, where siblings sorted
   // in the opposite to RPO order. This order will give us a clue, when during
-  // the normal traversal we go up the tree. For example:
+  // the normal traversal(using loop, not recursion) we go up the tree. For
+  // example:
   //
   //      CFG:   RPO(CFG):        DT:       DFS(DT):     SDFS(DT):
   //
@@ -1457,8 +1458,16 @@ Init(Function &F) {
   //
   // So this SDFSO which maps our RPOish DFS(DT) onto SDFS order gives us
   // points where we must backtrace our context(stack or whatever we keep
-  // updated).  These are the places where the next SDFSO is less than the
-  // previous one.
+  // updated). These are the places where the next SDFSO is less than the
+  // previous one. With the example above traversal stack will look like this:
+  //
+  // DFS: a - c - b - d - e
+  //
+  //  1  2  3  4  5
+  // ---------------
+  //  a  c  b  d  e
+  //     a  a  a  d
+  //              a
   //
   for (auto &B : *RPOT) {
     auto *Node = DT->getNode(B);
@@ -1546,12 +1555,13 @@ FactorInsertionMaterialized() {
 
     if (IgnoreExpression(T)) continue;
 
-    // Set already know expression versions
+    // Set already known expression versions
     for (unsigned i = 0, l = PHI->getNumOperands(); i < l; ++i) {
       auto B = PHI->getIncomingBlock(i);
       auto O = PHI->getOperand(i);
 
-      // This is a switch, it better have the same value along several branches
+      // This is a switch, it better have the same value along multiple edges
+      // it reaches this PHI
       if (auto OO = F->getVExpr(B)) {
         if (OO != ValueToExp[O])
           llvm_unreachable("This is the switch case i was affraid of");
@@ -1588,7 +1598,7 @@ FactorInsertionRegular() {
   // Factors are inserted in two cases:
   //   - for each block in expressions IDF
   //   - for each phi of expression operand, which indicates expression
-  //     alteration
+  //     alteration(TODO, requires operand versioning)
   for (auto &P : PExprToInsts) {
     auto &PE = P.getFirst();
 
@@ -1630,10 +1640,6 @@ FactorInsertionRegular() {
         AddFactor(F, PE, B);
       }
     }
-
-    // TODO
-    // Once operands phi-ud graphs are ready we need to traverse them to insert
-    // Factors at each operands' phi definition as in paper.
   }
 }
 
@@ -1741,38 +1747,11 @@ RenamePass() {
       // Do nothing for ignored expressions
       if (IgnoreExpression(VE)) continue;
 
-      // TODO Any operand definition handling goes here
-
-      // TODO
-      // This is a simplified version for operand comparison, normally we would
-      // check current operands on their respected stacks with operands for the
-      // VExpr on its stack, if they match we assign the same version,
-      // otherwise there was a def for VExpr operand and we need to assign a
-      // new version. This will be required when operand versioning is
-      // implemented.
-      //
-      // For now this will suffice, the only case we reuse a version if we've
-      // seen this expression before, since in SSA there is a singe def for an
-      // operand.
-      //
-      // This limits algorithm effectiveness, because we do not track operands'
-      // versions we cannot prove that certain separate expressions are in fact
-      // the same expressions of different versions. TBD, anyway.
-      //
-      // Another thing related to not tracking operand versions, because of
-      // that there always will be a single definition of VExpr's operand and
-      // the VExpr itself will follow it in the traversal, thus, for now, we do
-      // not have to assign ⊥ version to the VExpr whenever we see its operand
-      // defined.
       auto &VEStack = PExprToVExprStack[PE];
       auto *VEStackTop = VEStack.empty() ? nullptr : VEStack.top().second;
       auto *VEStackTopF = VEStackTop
                             ? dyn_cast<FactorExpression>(VEStackTop)
                             : nullptr;
-
-      // NOTE
-      // We do not push on the stack neither already seen versions nor operand
-      // definitions, since ... TODO finish this
 
       // NOTE
       // We have to do opportunistic substitution additions, otherwise it is
@@ -1855,6 +1834,8 @@ RenamePass() {
       } else {
         // We need to campare all operands versions, if they don't match we are
         // dealing with a new expression
+        // ??? Should we traverse the stack instead, in search of the similar VE
+        // ??? Though tests show there is no effect anyway
         bool SameVersions = true;
         auto VEBE = dyn_cast<BasicExpression>(VE);
         auto VEStackTopBE = dyn_cast<BasicExpression>(VEStackTop);
@@ -1935,12 +1916,6 @@ RenamePass() {
 
 void SSAPRE::
 RenameCleaup() {
-  // TODO clean this up
-  // TODO Redundant Factors
-  // TODO 1. we need to spot redundant Factors that join differently versioned
-  // TODO expressions which have the same operands
-  // TODO 2. Newly versioned factors that are the same as linked factors
-
   SmallPtrSet<FactorExpression *, 32> FactorKillList;
 
   // We are interested only in comparing the non-materialized Factors and any
@@ -2108,22 +2083,15 @@ RenameInductivityPass() {
   }
 
   // Remove all stuff related
-  DEBUG(dbgs() << "\nInduction.Kill:");
   for (auto F : FactorKillList) {
-    DEBUG(dbgs() << "\n");
-    DEBUG(F->dump());
 
-    if (auto P = F->getProto()) {
-      P->dropAllReferences();
-    }
+    if (auto P = F->getProto()) P->dropAllReferences();
 
     auto PHI = FactorToPHI[F];
     auto REP = PHI ? InstToVExpr[PHI] : GetTop();
     KillFactor(F);
-    // AddSubstitution(F, GetTop());
     AddSubstitution(F, REP, /* direct */ true, /* force */ true);
   }
-  DEBUG(dbgs() << "\n");
 }
 
 void SSAPRE::
@@ -2249,10 +2217,7 @@ void SSAPRE::
 ResetLater(FactorExpression *G) {
   G->setLater(false);
   for (auto F : FExprs) {
-    // Checking for dominance is necessary to prevent update on back branch.
-    // Ignoring this may lead to True(WBA) of Half-Available Factor
-    if (F->hasVExpr(G) && F->getLater() /* && NotStrictlyDominates(G, F) */)
-      ResetLater(F);
+    if (F->hasVExpr(G) && F->getLater()) ResetLater(F);
   }
 }
 
@@ -2264,19 +2229,6 @@ WillBeAvail() {
 
 void SSAPRE::
 Finalize() {
-  // Finalize step performs the following tasks:
-  //   - Decides for each Real expression whether it should be computed on the
-  //     spot or reloaded from the temporary. For each one that is computed, it
-  //     also decides whether the result should be saved to the temp. There are
-  //     two flags that control all that: Save and Reload.
-  //   - For Factors where will_be_avail is true, insertions are performed at
-  //     the incoming edges that correspond to Factor operands at which the
-  //     expression is not available
-  //   - Expression Factors whose will_be_avail predicate is true may become PHI
-  //     for the temp. Factors that are not will_be_avail will not be part of the
-  //     SSA form of the temp, and links from will_be_avail Factors that
-  //     reference them are fixed up to other(real or inserted) expressions.
-
   DenseMap<const Expression *, DenseMap<int, Expression *>> AvailDef;
 
   // Init available definitons map
@@ -2284,7 +2236,7 @@ Finalize() {
     AvailDef.insert({P.getFirst(), DenseMap<int,Expression *>()});
   }
 
-  // NOTE Using DT walk here is not really necessary because this loop do not
+  // NOTE Using DT walk here is not really necessary because this loop does not
   // NOTE touch any successors
   auto DFI = df_begin(DT->getRootNode());
   for (auto DFE = df_end(DT->getRootNode()); DFI != DFE; ++DFI) {
