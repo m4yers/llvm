@@ -56,6 +56,7 @@ STATISTIC(SSAPREInstrInserted,     "Number of instructions inserted");
 STATISTIC(SSAPREInstrKilled,       "Number of instructions deleted");
 STATISTIC(SSAPREPHIInserted,       "Number of phi inserted");
 STATISTIC(SSAPREPHIKilled,         "Number of phi deleted");
+STATISTIC(SSAPREBlah,              "Blah");
 
 // Anchor methods.
 namespace llvm {
@@ -1263,12 +1264,9 @@ public:
         // Back Branch source
         const PHINode * BackBranch = nullptr;
 
-        BasicBlock * TopMostBottomBlock = nullptr;
-        SmallPtrSet<Expression *, 4> NonBottomArgs;
 
         for (unsigned i = 0, l = PHI->getNumOperands(); i < l; ++i) {
           auto Op = PHI->getOperand(i);
-          auto BB = PHI->getIncomingBlock(i);
           auto OVE = O.ValueToExp[Op];
 
           // Can happen after other optimization passes
@@ -1295,11 +1293,6 @@ public:
           if (O.IsVariableOrConstant(OVE)) {
             TOK = CalculateToken(TOK,
                 TPST == TPST_Approximation ? GetTopTok() : GetBotTok());
-            if (!TopMostBottomBlock) {
-              TopMostBottomBlock = BB;
-            } else if (O.DT->dominates(BB, TopMostBottomBlock)) {
-              TopMostBottomBlock = BB;
-            }
 
             continue;
           }
@@ -1326,28 +1319,8 @@ public:
             // Otherwise we use whatever this VE is prototyped by
           } else {
             TOK = CalculateToken(TOK, O.ExprToPExpr[OVE]);
-            NonBottomArgs.insert(OVE);
 
             continue;
-          }
-        }
-
-        // TODO explain this
-        // If there any bottom arguments we need to verify that all other
-        // argument expressions' arguments dominate this bottom's origin basic
-        // block
-        if (TOK != GetBotTok() && TopMostBottomBlock) {
-          for (auto VE : NonBottomArgs) {
-            auto T = O.InstToVExpr[TopMostBottomBlock->getTerminator()];
-            // The first term checks whether VE's operands dominate every
-            // bottoms' origin blocks. The second term is a special case for
-            // cycles, if VE is a back-branch we can still use this PHI as a
-            // Factor.
-            if (!O.OperandsDominate(VE, T) &&
-                !O.DT->dominates(PHI, O.VExprToInst[VE])) {
-              TOK = GetBotTok();
-              break;
-            }
           }
         }
 
