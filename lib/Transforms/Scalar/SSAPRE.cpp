@@ -788,17 +788,14 @@ FillInBasicExpressionInfo(Instruction &I, BasicExpression *E) {
 }
 
 std::pair<unsigned, unsigned> SSAPRE::
-AssignDFSNumbers(BasicBlock *B, unsigned Start,
-                 InstrToOrderType *M, OrderedInstrType *V) {
+AssignDFSNumbers(BasicBlock *B, unsigned Start, InstrToOrderType *M) {
   unsigned End = Start;
   // if (MemoryAccess *MemPhi = MSSA->getMemoryAccess(B)) {
   //   InstrDFS[MemPhi] = End++;
-  //   DFSToInstr.emplace_back(MemPhi);
   // }
 
   for (auto &I : *B) {
     if (M) (*M)[&I] = End++;
-    if (V) V->emplace_back(&I);
   }
 
   // All of the range functions taken half-open ranges (open on the end side).
@@ -1377,7 +1374,6 @@ Init(Function &F) {
   // instructions within wide DFS/SDFS range
   unsigned ICountGrowth = 100000;
   unsigned ICount = ICountGrowth;
-  // DFSToInstr.emplace_back(nullptr);
 
   DenseMap<const DomTreeNode *, unsigned> RPOOrdering;
   unsigned Counter = 0;
@@ -1433,7 +1429,7 @@ Init(Function &F) {
   auto DFI = df_begin(DT->getRootNode());
   for (auto DFE = df_end(DT->getRootNode()); DFI != DFE; ++DFI) {
     auto B = DFI->getBlock();
-    auto BlockRange = AssignDFSNumbers(B, ICount, &InstrDFS, nullptr);
+    auto BlockRange = AssignDFSNumbers(B, ICount, &InstrDFS);
     ICount += BlockRange.second - BlockRange.first + ICountGrowth;
   }
 
@@ -1480,7 +1476,7 @@ Init(Function &F) {
   DFI = df_begin(DT->getRootNode());
   for (auto DFE = df_end(DT->getRootNode()); DFI != DFE; ++DFI) {
     auto B = DFI->getBlock();
-    auto BlockRange = AssignDFSNumbers(B, ICount, &InstrSDFS, nullptr);
+    auto BlockRange = AssignDFSNumbers(B, ICount, &InstrSDFS);
     ICount += BlockRange.second - BlockRange.first + ICountGrowth;
   }
 
@@ -1515,7 +1511,6 @@ Fini() {
 
   FactorToPHI.clear();
   PHIToFactor.clear();
-  DFSToInstr.clear();
 
   InstToVExpr.clear();
   VExprToInst.clear();

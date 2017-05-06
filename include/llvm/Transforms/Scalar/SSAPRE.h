@@ -637,10 +637,6 @@ class SSAPRE : public PassInfoMixin<SSAPRE> {
   InstrToOrderType InstrDFS;
   InstrToOrderType InstrSDFS;
 
-  // This contains the mapping DFS numbers to instructions.
-  typedef SmallVector<const Value *, 32> OrderedInstrType;
-  OrderedInstrType DFSToInstr;
-
   // Instruction-to-Expression map
   DenseMap<const Instruction *, Expression *> InstToVExpr;
   DenseMap<const Expression *, Instruction *> VExprToInst;
@@ -786,8 +782,7 @@ private:
   bool FillInBasicExpressionInfo(Instruction &I, BasicExpression *E);
 
   std::pair<unsigned, unsigned>
-  AssignDFSNumbers(BasicBlock *B, unsigned Start, InstrToOrderType *M,
-                   OrderedInstrType *V);
+  AssignDFSNumbers(BasicBlock *B, unsigned Start, InstrToOrderType *M);
 
   // Take a Value returned by simplification of Expression E/Instruction I, and
   // see if it resulted in a simpler expression. If so, return that expression.
