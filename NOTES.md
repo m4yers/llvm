@@ -1,6 +1,3 @@
-Paper vs. Reality
-================
-
 ## Terminology
 
 ### Real Occurrence and Prototype
